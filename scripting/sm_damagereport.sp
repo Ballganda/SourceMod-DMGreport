@@ -1,11 +1,3 @@
-/*
-  Developed: 
-  2007-12-20
-  
-  By:
-  [30+]Gemeni (gemeni@30plus.ownit.se)
-*/
-
 #include <sourcemod>
 #include <sdktools>
 
