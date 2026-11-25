@@ -16,6 +16,16 @@
 #define DEFAULT_PREFIX "[theREG...]"
 #define TEST_PREFIX "[cfg test]"
 #define CONFIG_LEN 4096
+#define ADMIN_ONLY_CVAR "sm_damagereport_access_admin_only"
+#define ADMIN_FLAGS_CVAR "sm_damagereport_access_admin_flags"
+#define TEST_ADMIN_FLAGS "o"
+#define AWARDS_ADMIN_CVAR "sm_damagereport_awards_admin_only"
+#define TITLE_CVAR "sm_damagereport_panel_title"
+#define DEFAULT_TITLE "theREG...DMGreport:"
+// Award lines: green prefix, default text, light green name.
+#define AWARD_DAMAGE "\x0740FF40theREG...\x07FF4040>DMG<: \x0799CCFF"
+#define AWARD_KILLS "\x0740FF40theREG...\x07FF4040>KILLS<: \x0799CCFF"
+#define AWARD_STAT "\x07FFD700"
 // A reloaded plugin runs OnPluginStart and, loaded late, OnConfigsExecuted at once.
 #define RELOAD_WAIT 1.5
 #define NAME_LEN 96
@@ -43,6 +53,8 @@ enum
 	C_CHAT_MODE,
 	C_OFF,
 	C_ROUND_END_ALIVE,
+	C_ADMIN_ONLY,
+	C_AWARDS_AUDIENCE,
 	NUM_CASES
 }
 
@@ -101,10 +113,12 @@ public void OnPluginStart()
 	SetCase(C_FAKE_FIGHT, "fake vs fake damage, death, world damage, round end raise no error", false);
 	SetCase(C_DEATH_PANEL, "real client: killed player gets the report panel", true);
 	SetCase(C_LAST_REPORT, "real client: dr shows the last report again", true);
-	SetCase(C_HELP, "real client: drs help lists the commands", true);
+	SetCase(C_HELP, "real client: dr help lists the commands", true);
 	SetCase(C_CHAT_MODE, "real client: drs chat prints the report in chat, no panel", true);
 	SetCase(C_OFF, "real client: drs off shows no report", true);
-	SetCase(C_ROUND_END_ALIVE, "real client: alive player gets report panel and most-damage chat at round end", true);
+	SetCase(C_ROUND_END_ALIVE, "real client: alive player gets the report panel, both award lines and no report text in chat at round end", true);
+	SetCase(C_ADMIN_ONLY, "real client: admin-only mode hides reports from non-admins, admin flag gives access", true);
+	SetCase(C_AWARDS_AUDIENCE, "real client: awards reach all players or only admins, apart from report access", true);
 
 	RegServerCmd("dr_test", Cmd_RunTests, "Run the damage report regression tests");
 	g_cvAutorun = CreateConVar("dr_test_autorun", "0", "Run the suite on map start and quit when done <1|0>.", FCVAR_NONE, true, 0.0, true, 1.0);
@@ -262,6 +276,8 @@ public Action Timer_Step(Handle timer, any data)
 
 void SkipCase(const char[] why)
 {
+	if (g_curCase == C_ADMIN_ONLY || g_curCase == C_AWARDS_AUDIENCE)
+		ResetAdminOnly();
 	LogToFileEx(g_logPath, "[SKIP] %s - %s", g_caseNames[g_curCase], why);
 	PrintToServer("[SKIP] %s - %s", g_caseNames[g_curCase], why);
 	g_skip++;
@@ -275,6 +291,8 @@ void EndCase(bool ok, const char[] msg)
 {
 	if (!g_caseActive)
 		return;
+	if (g_curCase == C_ADMIN_ONLY || g_curCase == C_AWARDS_AUDIENCE)
+		ResetAdminOnly();
 	if (g_interfered && g_attempt < MAX_ATTEMPTS)
 	{
 		PrintToServer("[dr_test] real round_start during \"%s\" (attempt %d); retrying", g_caseNames[g_curCase], g_attempt);
@@ -433,6 +451,8 @@ void RunStep(int c, int step)
 		case C_CHAT_MODE: Case_ChatMode(step);
 		case C_OFF: Case_Off(step);
 		case C_ROUND_END_ALIVE: Case_RoundEndAlive(step);
+		case C_ADMIN_ONLY: Case_AdminOnly(step);
+		case C_AWARDS_AUDIENCE: Case_AwardsAudience(step);
 	}
 }
 
@@ -444,7 +464,7 @@ void Case_Loaded()
 		EndCase(false, PLUGIN_FILE ... " is not running");
 		return;
 	}
-	static const char cvars[][] = { "sm_damagereport_version", "sm_damagereport_prefix" };
+	static const char cvars[][] = { "sm_damagereport_version", "sm_damagereport_prefix", ADMIN_ONLY_CVAR, ADMIN_FLAGS_CVAR, AWARDS_ADMIN_CVAR, TITLE_CVAR, "sm_damagereport_awards_prefix", "sm_damagereport_awards_color_prefix", "sm_damagereport_awards_color_label", "sm_damagereport_awards_color_name", "sm_damagereport_awards_color_stat" };
 	for (int i = 0; i < sizeof(cvars); i++)
 	{
 		if (FindConVar(cvars[i]) == null)
@@ -466,7 +486,7 @@ void Case_Loaded()
 			return;
 		}
 	}
-	EndCase(true, "plugin, 2 cvars and 6 commands present");
+	EndCase(true, "plugin, 11 cvars and 6 commands present");
 }
 
 void Case_SettingsFile()
@@ -486,6 +506,10 @@ void Case_ConfigCreated()
 		EndCase(false, CONFIG_FILE ... " was not created");
 	else if (StrContains(text, PREFIX_CVAR ... " \"" ... DEFAULT_PREFIX ... "\"") == -1)
 		EndCase(false, CONFIG_FILE ... " has no " ... PREFIX_CVAR ... " entry at its default");
+	else if (StrContains(text, ADMIN_ONLY_CVAR ... " \"0\"") == -1 || StrContains(text, ADMIN_FLAGS_CVAR ... " \"b\"") == -1)
+		EndCase(false, CONFIG_FILE ... " lacks the admin-only cvars at their defaults");
+	else if (StrContains(text, AWARDS_ADMIN_CVAR ... " \"0\"") == -1 || StrContains(text, TITLE_CVAR ... " \"" ... DEFAULT_TITLE ... "\"") == -1)
+		EndCase(false, CONFIG_FILE ... " lacks the awards or panel title cvar at its default");
 	else if (StrContains(text, "sm_damagereport_version") != -1)
 		EndCase(false, CONFIG_FILE ... " holds the version cvar");
 	else
@@ -598,9 +622,14 @@ void Case_FakeFight(int step)
 		}
 		case 3:
 		{
-			if (FindHuman() != 0 && !ChatHas("inflicted most damage"))
+			if (FindHuman() != 0 && !ChatHas(AWARD_DAMAGE ... FAKE_ATTACKER ... AWARD_STAT ... ", 520 dmg in 2 hits"))
 			{
-				EndCase(false, "the real client got no most-damage chat line");
+				EndCase(false, "the real client got no prefixed most-damage line for 520 dmg in 2 hits");
+				return;
+			}
+			if (FindHuman() != 0 && !ChatHas(AWARD_KILLS ... FAKE_ATTACKER ... AWARD_STAT ... ", 1 kill"))
+			{
+				EndCase(false, "the real client got no prefixed most-kills line for 1 kill");
 				return;
 			}
 			EndCase(true, "events handled without errors");
@@ -659,12 +688,12 @@ void Case_Help(int step)
 	{
 		case 0:
 		{
-			FakeClientCommand(FindHuman(), "drs help");
+			FakeClientCommand(FindHuman(), "dr help");
 			Schedule(1.0, C_HELP, 1);
 		}
 		case 1:
 		{
-			if (ChatHas("/drs status") && ChatHas("/dr or /ldr or /dmg"))
+			if (ChatHas("/drs status") && ChatHas("/dr help (This list)"))
 				EndCase(true, "help lines sent");
 			else
 				EndCase(false, "help lines not in chat");
@@ -757,6 +786,7 @@ void Case_RoundEndAlive(int step)
 			}
 			SDKHooks_TakeDamage(fake, h, h, HIT_DAMAGE, DMG_BULLET);
 			SDKHooks_TakeDamage(fake, h, h, HIT_DAMAGE, DMG_BULLET);
+			SDKHooks_TakeDamage(fake, h, h, KILL_DAMAGE, DMG_BULLET);
 			FireRoundEnd();
 			Schedule(REPORT_WAIT, C_ROUND_END_ALIVE, 2);
 		}
@@ -764,10 +794,164 @@ void Case_RoundEndAlive(int step)
 		{
 			if (GetClientMenu(FindHuman()) != MenuSource_RawPanel)
 				EndCase(false, "no report panel open for the alive player");
-			else if (!ChatHas("inflicted most damage, 40 dmg in 2 hits"))
-				EndCase(false, "no most-damage chat line for 40 dmg in 2 hits");
+			else if (!ChatHas(AWARD_DAMAGE) || !ChatHas(AWARD_STAT ... ", 540 dmg in 3 hits"))
+				EndCase(false, "no prefixed most-damage chat line for 540 dmg in 3 hits");
+			else if (!ChatHas(AWARD_KILLS) || !ChatHas(AWARD_STAT ... ", 1 kill"))
+				EndCase(false, "no prefixed most-kills chat line for 1 kill");
+			else if (ChatHas("Total dmg:") || ChatHas(" dmg, "))
+				EndCase(false, "report text in chat in popup mode");
 			else
-				EndCase(true, "report panel and most-damage chat");
+				EndCase(true, "report panel open, both award lines in chat, no report text in chat");
+		}
+	}
+}
+
+AdminId g_testAdmin = INVALID_ADMIN_ID;
+
+void SetAdminOnly(bool on)
+{
+	FindConVar(ADMIN_ONLY_CVAR).BoolValue = on;
+	FindConVar(ADMIN_FLAGS_CVAR).SetString(on ? TEST_ADMIN_FLAGS : "b");
+}
+
+void GrantTestAdmin(int client)
+{
+	g_testAdmin = CreateAdmin("dr_test");
+	g_testAdmin.SetFlag(Admin_Custom1, true);
+	SetUserAdmin(client, g_testAdmin, true);
+}
+
+void ResetAdminOnly()
+{
+	int h = FindHuman();
+	if (h != 0 && g_testAdmin != INVALID_ADMIN_ID)
+		SetUserAdmin(h, INVALID_ADMIN_ID, true);
+	if (g_testAdmin != INVALID_ADMIN_ID)
+		RemoveAdmin(g_testAdmin);
+	g_testAdmin = INVALID_ADMIN_ID;
+	SetAdminOnly(false);
+	FindConVar(AWARDS_ADMIN_CVAR).BoolValue = false;
+}
+
+void Case_AdminOnly(int step)
+{
+	switch (step)
+	{
+		case 0:
+		{
+			if (GetUserAdmin(FindHuman()) != INVALID_ADMIN_ID)
+			{
+				SkipCase("the real client is an admin");
+				return;
+			}
+			// The previous case leaves its 8 s round-end panel open.
+			CancelClientMenu(FindHuman());
+			SetAdminOnly(true);
+			SetupHumanFight(C_ADMIN_ONLY);
+		}
+		case 1:
+		{
+			FakeClientCommand(FindHuman(), "drs status");
+			HumanKilledByFake(C_ADMIN_ONLY);
+		}
+		case 2:
+		{
+			int h = FindHuman();
+			if (g_menuBeforeKill)
+			{
+				EndCase(false, "a menu was already open before the kill");
+				return;
+			}
+			if (GetClientMenu(h) == MenuSource_RawPanel || ChatHas("Attackers (Total dmg:"))
+			{
+				EndCase(false, "a non-admin got a report in admin-only mode");
+				return;
+			}
+			if (!ChatHas("for admins only"))
+			{
+				EndCase(false, "no admins-only reply to drs status");
+				return;
+			}
+			GrantTestAdmin(h);
+			ResetCapture();
+			FakeClientCommand(h, "drs status");
+			Schedule(1.0, C_ADMIN_ONLY, 3);
+		}
+		case 3:
+		{
+			if (ChatHas("Damage report is switched on"))
+				EndCase(true, "non-admin denied, admin with flag o gets drs status");
+			else
+				EndCase(false, "admin with flag o got no drs status reply");
+		}
+	}
+}
+
+void Case_AwardsAudience(int step)
+{
+	int h = FindHuman();
+	switch (step)
+	{
+		case 0:
+		{
+			if (GetUserAdmin(h) != INVALID_ADMIN_ID)
+			{
+				SkipCase("the real client is an admin");
+				return;
+			}
+			CancelClientMenu(h);
+			SetAdminOnly(true);
+			SetupHumanFight(C_AWARDS_AUDIENCE);
+		}
+		case 1:
+		{
+			int fake = GetClientOfUserId(g_uidAttacker);
+			if (fake == 0)
+			{
+				EndCase(false, "fake client is gone");
+				return;
+			}
+			SDKHooks_TakeDamage(fake, h, h, HIT_DAMAGE, DMG_BULLET);
+			FireRoundEnd();
+			Schedule(REPORT_WAIT, C_AWARDS_AUDIENCE, 2);
+		}
+		case 2:
+		{
+			if (GetClientMenu(h) == MenuSource_RawPanel)
+			{
+				EndCase(false, "a non-admin got the report panel in admin-only mode");
+				return;
+			}
+			if (!ChatHas(AWARD_DAMAGE))
+			{
+				EndCase(false, "awards for all players: the non-admin got no most-damage line");
+				return;
+			}
+			FindConVar(AWARDS_ADMIN_CVAR).BoolValue = true;
+			ResetCapture();
+			FireRoundEnd();
+			Schedule(REPORT_WAIT, C_AWARDS_AUDIENCE, 3);
+		}
+		case 3:
+		{
+			if (ChatHas(">DMG<"))
+			{
+				EndCase(false, "awards for admins only: the non-admin got a most-damage line");
+				return;
+			}
+			GrantTestAdmin(h);
+			ResetCapture();
+			FireRoundEnd();
+			Schedule(REPORT_WAIT, C_AWARDS_AUDIENCE, 4);
+		}
+		case 4:
+		{
+			if (!ChatHas(AWARD_DAMAGE))
+				EndCase(false, "awards for admins only: the admin got no most-damage line");
+			else if (GetClientMenu(h) != MenuSource_RawPanel)
+				EndCase(false, "the admin got no report panel");
+			else
+				EndCase(true, "non-admin: awards only when for all players; admin: awards and panel");
 		}
 	}
 }

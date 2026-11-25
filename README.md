@@ -26,8 +26,18 @@ Requires SourceMod 1.12 or later.
 | `/drs` (or `/damage_report`) `on`, `off` | Turns your report on or off. |
 | `/drs popup`, `/drs chat` | Shows the report in a panel or in chat. |
 | `/drs long`, `/drs short` | Shows or hides the hitbox details. |
-| `/drs status`, `/drs help` | Shows your settings, or lists the commands. |
+| `/drs status` | Shows your settings. |
 | `/dr` (or `/ldr`, `/dmg`, `/last_damage_report`) | Shows your last report again. |
+| `/dr help` | Lists the commands. |
+
+`/drs` changes your settings. `/dr` shows your report.
+
+At round end every player gets two chat lines, the round awards. In popup mode (the default) these are the only lines in chat; the report itself is in the panel:
+
+```
+theREG...>DMG<: Alpha, 158 dmg in 3 hits
+theREG...>KILLS<: Alpha, 1 kill
+```
 
 ## Configuration
 
@@ -35,7 +45,16 @@ Requires SourceMod 1.12 or later.
 
 | Cvar | Default | Meaning |
 | --- | --- | --- |
-| `sm_damagereport_prefix` | `[theREG...]` | Text shown before the plugin's chat messages. |
+| `sm_damagereport_prefix` | `[theREG...]` | Text shown before the plugin's chat messages. Plain text: the plugin shows it in green. |
+| `sm_damagereport_awards_prefix` | `theREG...` | Text before the round award lines. |
+| `sm_damagereport_awards_color_prefix` | `40FF40` | Color of the award prefix (green). Each color cvar takes a 6-digit hex color `RRGGBB`. A wrong value is logged and set back to the default. |
+| `sm_damagereport_awards_color_label` | `FF4040` | Color of `>DMG<:` and `>KILLS<:` (red). |
+| `sm_damagereport_awards_color_name` | `99CCFF` | Color of the player name (light blue). |
+| `sm_damagereport_awards_color_stat` | `FFD700` | Color of the numbers (gold). |
+| `sm_damagereport_panel_title` | `theREG...DMGreport:` | Title line of the report panel. |
+| `sm_damagereport_access_admin_only` | `0` | `1`: only admins with `sm_damagereport_access_admin_flags` get reports and the commands. Other players get "Damage report is for admins only". |
+| `sm_damagereport_awards_admin_only` | `0` | `0`: every player sees the round awards. `1`: only admins with `sm_damagereport_access_admin_flags` see them. It does not depend on `sm_damagereport_access_admin_only`. |
+| `sm_damagereport_access_admin_flags` | `b` | Admin flags for both admin-only cvars, for example `b` or `z`. Root admins always have access. An admin override named `sm_damagereport_access` changes the flags too. |
 | `sm_damagereport_version` | build | The plugin version. Read only. |
 
 ### Config file
@@ -95,9 +114,9 @@ To install the plugin, copy `plugins\sm_damagereport.smx` to `addons\sourcemod\p
 
 | Command | What it does |
 | --- | --- |
-| `.\test.ps1` | Runs on a free test slot from `srcds-slot.ps1`. Only the 6 cases that need no real player run; the other 6 report SKIP. |
+| `.\test.ps1` | Runs on a free test slot from `srcds-slot.ps1`. Only the 6 cases that need no real player run; the other 8 report SKIP. |
 | `.\test.ps1 -ServerDir <srcds folder> -Port <port>` | Runs on that server instead of a slot. The server must not be running. |
-| `.\test.ps1 -WithClient` | Also starts the CS:S client, so all 12 cases run. Do not touch the game window during the run (about 5 minutes). |
+| `.\test.ps1 -WithClient` | Also starts the CS:S client, so all 14 cases run. Do not touch the game window during the run (about 5 minutes). |
 | `.\test.ps1 -InjectError` | Self-check: the suite writes a deliberate error. This run must fail. |
 
 The run passes when the last line is `RESULT: PASS`. The results of each case are also in `addons\sourcemod\logs\damagereport_tests.log` on the test server.
@@ -107,6 +126,18 @@ Notes:
 - `CSS_SERVER_DIR` and `CSS_CLIENT_DIR` set the server and client folders.
 - The panel cases check that the report panel is open. A plugin cannot read the text of a SourceMod panel. The chat-mode case checks the report text, which is the same text the panel shows.
 - The config cases write their own `configs/sm_damagereport.cfg` and reload the plugin. Each case puts the file back when it ends.
+
+## Changes after 2.1.0 (not released)
+
+- The prefix is green and the message text after it is in the default chat color. Every chat line of the plugin starts with the prefix, the round awards and the chat-mode headers included.
+- The round awards have one format, in four colors: the prefix green, the label red, the player name light blue, the numbers gold. New cvars set the prefix (`sm_damagereport_awards_prefix`) and each of the four colors (`sm_damagereport_awards_color_*`).
+  - `theREG...>DMG<: Alpha, 158 dmg in 3 hits`
+  - `theREG...>KILLS<: Alpha, 1 kill`
+- New cvars `sm_damagereport_access_admin_only` and `sm_damagereport_access_admin_flags`: admin-only mode. See **Cvars**.
+- New cvar `sm_damagereport_awards_admin_only`: the round awards go to every player or only to admins.
+- New cvar `sm_damagereport_panel_title` (default `theREG...DMGreport:`): the title line of the report panel.
+- `/dr help` lists the commands. The panel footer says `Type "/dr help" in chat for commands`.
+- Fixed: after a plugin reload during a map, the report and the awards showed empty player names.
 
 ## Changes in 2.1.0
 

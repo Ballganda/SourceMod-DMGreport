@@ -170,7 +170,7 @@ finally {
             }
         }
         if ($WithClient) {
-            $chat = @(Get-NewLines $clientLog $before | Where-Object { $_ -match 'Damage report|inflicted most damage|Attackers|Victims|/drs' })
+            $chat = @(Get-NewLines $clientLog $before | Where-Object { $_ -match 'Damage report|>DMG<|>KILLS<|Attackers|Victims|/drs' })
             if ($chat.Count) { Write-Host "`nClient chat:"; $chat | ForEach-Object { Write-Host "  $_" -ForegroundColor Cyan } }
         }
         Write-Host ''
