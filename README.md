@@ -127,9 +127,11 @@ Notes:
 - The panel cases check that the report panel is open. A plugin cannot read the text of a SourceMod panel. The chat-mode case checks the report text, which is the same text the panel shows.
 - The config cases write their own `configs/sm_damagereport.cfg` and reload the plugin. Each case puts the file back when it ends.
 
-## Changes after 2.1.0 (not released)
+## Changes in 2.2.0
 
-- The prefix is green and the message text after it is in the default chat color. Every chat line of the plugin starts with the prefix, the round awards and the chat-mode headers included.
+Changes since 2.1.0:
+
+- The prefix is green and the message text after it is in the default chat color. Every chat line of the plugin except the round awards starts with this prefix, the chat-mode headers included.
 - The round awards have one format, in four colors: the prefix green, the label red, the player name light blue, the numbers gold. New cvars set the prefix (`sm_damagereport_awards_prefix`) and each of the four colors (`sm_damagereport_awards_color_*`).
   - `theREG...>DMG<: Alpha, 158 dmg in 3 hits`
   - `theREG...>KILLS<: Alpha, 1 kill`
@@ -139,6 +141,8 @@ Notes:
 - The long report shows the damage per body part after the hit count: `Head:1 (98) Chest:2 (54)`. Before, it showed only the hits.
 - `/dr help` lists the commands. The panel footer says `Type "/dr help" in chat for commands`.
 - Fixed: after a plugin reload during a map, the report and the awards showed empty player names.
+
+Tested: regression suite with the real CS:S client (`test.ps1 -WithClient`), 14 passed, 0 failed, 0 skipped.
 
 ## Changes in 2.1.0
 

@@ -55,7 +55,7 @@ enum AwardPart
 #define propPopChat 1
 #define propShortLong 2
 
-#define PLUGIN_VERSION "2.1.0"
+#define PLUGIN_VERSION "2.2.0"
 
 public Plugin myinfo =
 {
