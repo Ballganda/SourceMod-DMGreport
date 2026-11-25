@@ -8,6 +8,10 @@
 #define MAXHITGROUPS 7
 #define NROFOPTIONS 3
 #define MAX_FILE_LEN 80
+#define DR_NAME_MAX_TOTAL   21
+#define DR_NAME_TRUNCATE_AT 18
+#define DR_PREFIX_MAX       32
+#define DR_MENU_RETRY_MAX 8  // 8 * 1s = 8s max wait
 
 #define DrON  1
 #define DrOFF 0
@@ -63,6 +67,8 @@ char g_HistDamageTakenLong[MAXPLAYERS + 1][512];
 int  g_HistTotalDamageTaken[MAXPLAYERS + 1];
 
 ConVar g_versionConVar;
+ConVar g_cvPrefix;
+char g_Prefix[DR_PREFIX_MAX];
 
 int g_maxClients;
 
@@ -71,11 +77,19 @@ char g_HitboxName[MAXHITGROUPS + 1][20];
 // Variable for Temp fix
 int g_MenuCleared[MAXPLAYERS + 1];
 
+int g_MenuRetryCount[MAXPLAYERS + 1];
+bool g_ReportPending[MAXPLAYERS + 1];
+
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
 {
     g_lateLoaded = late;
     return APLRes_Success;
+}
+
+public void OnPrefixChanged(ConVar convar, const char[] oldValue, const char[] newValue)
+{
+    strcopy(g_Prefix, sizeof(g_Prefix), newValue);
 }
 
 // Hook events on plugin start
@@ -85,6 +99,10 @@ public void OnPluginStart(){
   g_versionConVar = CreateConVar("sm_damagereport_version", PLUGIN_VERSION, "Damage report version", FCVAR_PLUGIN | FCVAR_SPONLY | FCVAR_REPLICATED | FCVAR_NOTIFY);
   
   SetConVarString(g_versionConVar, PLUGIN_VERSION);
+
+  g_cvPrefix = CreateConVar("sm_damagereport_prefix", "[theREG...]", "Text shown before damage report chat messages");
+  g_cvPrefix.GetString(g_Prefix, sizeof(g_Prefix));
+  g_cvPrefix.AddChangeHook(OnPrefixChanged);
   
   HookEvent("player_death", Event_PlayerDeath);
   HookEvent("player_hurt", Event_PlayerHurt);
@@ -93,19 +111,23 @@ public void OnPluginStart(){
   HookEvent("round_start", EventRoundStart);
 
   HookEvent("player_disconnect", Event_PlayerDisconnect);
-  HookEvent("player_connect", Event_PlayerConnect);
 
   RegConsoleCmd("damage_report", Command_DamageReport);
-  RegConsoleCmd("dr", Command_DamageReport);
+  RegConsoleCmd("drs", Command_DamageReport);
   RegConsoleCmd("last_damage_report", Command_LastDamageReport);
   RegConsoleCmd("ldr", Command_LastDamageReport);
   RegConsoleCmd("dmg", Command_LastDamageReport);
+  RegConsoleCmd("dr", Command_LastDamageReport);
   
 
   KVSettings = CreateKeyValues("DamageReportSetting");
-  BuildPath(Path_SM, g_filenameSettings, sizeof(g_filenameSettings), "data/damagereportsetting.txt");
+  BuildPath(Path_SM, g_filenameSettings, sizeof(g_filenameSettings), "configs/damagereportusersettings.cfg");
   if (!FileToKeyValues(KVSettings, g_filenameSettings))
   {
+    // Carry over settings saved at the old location
+    char oldFilename[MAX_FILE_LEN];
+    BuildPath(Path_SM, oldFilename, sizeof(oldFilename), "data/damagereportsetting.txt");
+    FileToKeyValues(KVSettings, oldFilename);
     KeyValuesToFile(KVSettings, g_filenameSettings);
   }       
 
@@ -122,6 +144,8 @@ public void OnPluginStart(){
       }
   }
     
+    strcopy(g_PlayerName[0], sizeof(g_PlayerName[]), "WORLD");
+
     strcopy(g_HitboxName[0], sizeof(g_HitboxName[]), "Body");
     strcopy(g_HitboxName[1], sizeof(g_HitboxName[]), "Head");
     strcopy(g_HitboxName[2], sizeof(g_HitboxName[]), "Chest");
@@ -154,7 +178,7 @@ public Action Command_LastDamageReport(int client, int args)
     }
     else
     {
-        PrintToChat(client, "\x04No history to display");
+        PrintToChat(client, "\x04%s No history to display", g_Prefix);
     }
 
     return Plugin_Handled;
@@ -171,7 +195,7 @@ public Action Command_DamageReport(int client, int args)
     // If too few or too many arguments
     if (args != 1)
     {
-        PrintToChat(client, "\x04Usage: /damage_report help");
+        PrintToChat(client, "\x04%s Usage: /drs help", g_Prefix);
         return Plugin_Handled;
     }
 
@@ -181,64 +205,64 @@ public Action Command_DamageReport(int client, int args)
     if (StrEqual(option, "on", false))
     {
         g_PlayerDROption[client][propOnOff] = DrON;
-        PrintToChat(client, "\x04Damage report switched on");
+        PrintToChat(client, "\x04%s Damage report switched on", g_Prefix);
     }
     else if (StrEqual(option, "off", false))
     {
         g_PlayerDROption[client][propOnOff] = DrOFF;
-        PrintToChat(client, "\x04Damage report switched off");
+        PrintToChat(client, "\x04%s Damage report switched off", g_Prefix);
     }
     else if (StrEqual(option, "popup", false))
     {
         g_PlayerDROption[client][propPopChat] = DrPop;
-        PrintToChat(client, "\x04Damage report printed in popup menu");
+        PrintToChat(client, "\x04%s Damage report printed in popup menu", g_Prefix);
     }
     else if (StrEqual(option, "chat", false))
     {
         g_PlayerDROption[client][propPopChat] = DrChat;
-        PrintToChat(client, "\x04Damage report printed in chat");
+        PrintToChat(client, "\x04%s Damage report printed in chat", g_Prefix);
     }
     else if (StrEqual(option, "short", false))
     {
         g_PlayerDROption[client][propShortLong] = DrShort;
-        PrintToChat(client, "\x04Hitbox data will not be shown");
+        PrintToChat(client, "\x04%s Hitbox data will not be shown", g_Prefix);
     }
     else if (StrEqual(option, "long", false))
     {
         g_PlayerDROption[client][propShortLong] = DrLong;
-        PrintToChat(client, "\x04Hitbox data will be shown");
+        PrintToChat(client, "\x04%s Hitbox data will be shown", g_Prefix);
     }
     else if (StrEqual(option, "status", false))
     {
         if (g_PlayerDROption[client][propOnOff] == DrON)
         {
-            PrintToChat(client, "\x04Damage report is switched on");
+            PrintToChat(client, "\x04%s Damage report is switched on", g_Prefix);
 
             if (g_PlayerDROption[client][propPopChat] == DrPop)
-                PrintToChat(client, "\x04Damage report is printed in popup menu");
+                PrintToChat(client, "\x04%s Damage report is printed in popup menu", g_Prefix);
             else
-                PrintToChat(client, "\x04Damage report is printed in chat");
+                PrintToChat(client, "\x04%s Damage report is printed in chat", g_Prefix);
 
             if (g_PlayerDROption[client][propShortLong] == DrShort)
-                PrintToChat(client, "\x04Hitbox data is not shown");
+                PrintToChat(client, "\x04%s Hitbox data is not shown", g_Prefix);
             else
-                PrintToChat(client, "\x04Hitbox data is shown");
+                PrintToChat(client, "\x04%s Hitbox data is shown", g_Prefix);
         }
         else
         {
-            PrintToChat(client, "\x04Damage report is switched off");
+            PrintToChat(client, "\x04%s Damage report is switched off", g_Prefix);
         }
     }
     else
     {
-        PrintToChat(client, "\x04/damage_report on (Turn it on)");
-        PrintToChat(client, "\x04/damage_report off (Turn it off)");
-        PrintToChat(client, "\x04/damage_report popup (Popup menu)");
-        PrintToChat(client, "\x04/damage_report chat (Chat output)");
-        PrintToChat(client, "\x04/damage_report short (Hide hitbox info)");
-        PrintToChat(client, "\x04/damage_report long (Show hitbox info)");
-        PrintToChat(client, "\x04/damage_report status (Show current settings)");
-        PrintToChat(client, "\x04/last_damage_report or /ldr (Show last report)");
+        PrintToChat(client, "\x04%s /drs on (Turn it on)", g_Prefix);
+        PrintToChat(client, "\x04%s /drs off (Turn it off)", g_Prefix);
+        PrintToChat(client, "\x04%s /drs popup (Popup menu)", g_Prefix);
+        PrintToChat(client, "\x04%s /drs chat (Chat output)", g_Prefix);
+        PrintToChat(client, "\x04%s /drs short (Hide hitbox info)", g_Prefix);
+        PrintToChat(client, "\x04%s /drs long (Show hitbox info)", g_Prefix);
+        PrintToChat(client, "\x04%s /drs status (Show current settings)", g_Prefix);
+        PrintToChat(client, "\x04%s /dr or /ldr or /dmg (Show last report)", g_Prefix);
     }
 
     StoreSettingsForClient(client);
@@ -282,6 +306,11 @@ public void Event_PlayerHurt(Event event, const char[] name, bool dontBroadcast)
 {
     int healthDmg = event.GetInt("dmg_health");
     int hitgroup  = event.GetInt("hitgroup");
+
+    if (healthDmg <= 0)
+    {
+        return;
+    }
 
     int victim_id   = event.GetInt("userid");
     int attacker_id = event.GetInt("attacker");
@@ -335,7 +364,15 @@ public void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast
     int victim   = GetClientOfUserId(victim_id);
     int attacker = GetClientOfUserId(attacker_id);
 
-    g_KilledPlayer[attacker][victim] = 1;
+    if (victim <= 0 || victim > g_maxClients)
+    {
+        return;
+    }
+
+    if (attacker >= 0 && attacker <= g_maxClients)
+    {
+        g_KilledPlayer[attacker][victim] = 1;
+    }
 
     if (g_PlayerDROption[victim][propOnOff] == DrON
         && !IsFakeClient(victim)
@@ -376,6 +413,9 @@ public void BuildDamageString(int in_victim, int in_attacker)
     {
         if (g_DamageDone[in_victim][i] > 0)
         {
+            char displayName[DR_NAME_MAX_TOTAL + 1];
+            FormatPlayerName(displayName, sizeof(displayName), g_PlayerName[i]);
+
             if (g_KilledPlayer[in_victim][i] == 1)
             {
                 strcopy(killed, sizeof(killed), " (Killed)");
@@ -390,7 +430,7 @@ public void BuildDamageString(int in_victim, int in_attacker)
             Format(
                 damageDone, sizeof(damageDone),
                 "%s%s%s [%d dmg, %d hits]%s\n",
-                damageDone, xkilled, g_PlayerName[i],
+                damageDone, xkilled, displayName,
                 g_DamageDone[in_victim][i],
                 g_HitsDone[in_victim][i],
                 killed
@@ -399,7 +439,7 @@ public void BuildDamageString(int in_victim, int in_attacker)
             Format(
                 damageDoneLong, sizeof(damageDoneLong),
                 "%s%s%s [%d dmg, %d hits]%s\n",
-                damageDoneLong, xkilled, g_PlayerName[i],
+                damageDoneLong, xkilled, displayName,
                 g_DamageDone[in_victim][i],
                 g_HitsDone[in_victim][i],
                 killed
@@ -433,10 +473,13 @@ public void BuildDamageString(int in_victim, int in_attacker)
     }
 
     // Loop through all damage where you took damage
-    for (int i = 1; i <= g_maxClients; i++)
+    for (int i = 0; i <= g_maxClients; i++)
     {
         if (g_DamageTaken[in_victim][i] > 0)
         {
+            char displayName[DR_NAME_MAX_TOTAL + 1];
+            FormatPlayerName(displayName, sizeof(displayName), g_PlayerName[i]);
+
             if (i == in_attacker)
             {
                 strcopy(killer, sizeof(killer), " (Killer)");
@@ -451,7 +494,7 @@ public void BuildDamageString(int in_victim, int in_attacker)
             Format(
                 damageTaken, sizeof(damageTaken),
                 "%s%s%s [%d dmg, %d hits]%s\n",
-                damageTaken, xkiller, g_PlayerName[i],
+                damageTaken, xkiller, displayName,
                 g_DamageTaken[in_victim][i],
                 g_HitsTaken[in_victim][i],
                 killer
@@ -460,7 +503,7 @@ public void BuildDamageString(int in_victim, int in_attacker)
             Format(
                 damageTakenLong, sizeof(damageTakenLong),
                 "%s%s%s [%d dmg, %d hits]%s\n",
-                damageTakenLong, xkiller, g_PlayerName[i],
+                damageTakenLong, xkiller, displayName,
                 g_DamageTaken[in_victim][i],
                 g_HitsTaken[in_victim][i],
                 killer
@@ -528,6 +571,14 @@ public void DisplayDamageReport(
 {
     if (g_PlayerDROption[in_victim][propPopChat] == DrPop)
     {
+        if (g_ReportPending[in_victim])
+        {
+            return;
+        }
+
+        g_ReportPending[in_victim]  = true;
+        g_MenuRetryCount[in_victim] = 0;
+
         // Display damage report to the dead victim
         DataPack pack = new DataPack();
 
@@ -600,13 +651,23 @@ public Action DisplayDamageReportMenu(Handle timer, DataPack pack)
 
     if (!IsClientInGame(p_victim))
     {
+        g_ReportPending[p_victim] = false;
         return Plugin_Stop;
     }
 
     if (GetClientMenu(p_victim) != MenuSource_None)
     {
+        if (++g_MenuRetryCount[p_victim] >= DR_MENU_RETRY_MAX)
+        {
+            g_ReportPending[p_victim] = false;
+            return Plugin_Stop;
+        }
+
         return Plugin_Continue;
     }
+
+    g_ReportPending[p_victim]  = false;
+    g_MenuRetryCount[p_victim] = 0;
 
     Panel damageReportPanel = new Panel();
 
@@ -651,6 +712,11 @@ public void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast
     int userid = event.GetInt("userid");
     int client = GetClientOfUserId(userid);
 
+    if (client <= 0 || client > g_maxClients)
+    {
+        return;
+    }
+
     // Temp fix menu
     if (g_MenuCleared[client] == 0)
     {
@@ -668,30 +734,29 @@ public void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast
 }
 
 
-// Temp Fix
 public void Event_PlayerDisconnect(Event event, const char[] name, bool dontBroadcast)
 {
-    int userid = event.GetInt("userid");
-    int client = GetClientOfUserId(userid);
-
-    g_MenuCleared[client] = 0;
-
-    g_HistDamageDone[client][0] = '\0';
-    g_HistDamageDoneLong[client][0] = '\0';
-    g_HistTotalDamageDone[client] = 0;
-
-    g_HistDamageTaken[client][0] = '\0';
-    g_HistDamageTakenLong[client][0] = '\0';
-    g_HistTotalDamageTaken[client] = 0;
+    int client = GetClientOfUserId(event.GetInt("userid"));
+    ResetClientHistory(client);
 }
 
 
-public void Event_PlayerConnect(Event event, const char[] name, bool dontBroadcast)
+public void OnClientConnected(int client)
 {
-    int userid = event.GetInt("userid");
-    int client = GetClientOfUserId(userid);
+    ResetClientHistory(client);
+}
 
-    g_MenuCleared[client] = 0;
+
+void ResetClientHistory(int client)
+{
+    if (client <= 0 || client > g_maxClients)
+    {
+        return;
+    }
+
+    g_MenuCleared[client]   = 0;
+    g_MenuRetryCount[client] = 0;
+    g_ReportPending[client]  = false;
 
     g_HistDamageDone[client][0]     = '\0';
     g_HistDamageDoneLong[client][0] = '\0';
@@ -719,7 +784,7 @@ public void FindSettingsForClient(int client)
     {
         g_PlayerDROption[client][propOnOff]     = KvGetNum(KVSettings, "OnOff", g_defaultPropOnOff);
         g_PlayerDROption[client][propPopChat]   = KvGetNum(KVSettings, "PopChat", g_defaultPropChatPop);
-        g_PlayerDROption[client][propShortLong] = KvGetNum(KVSettings, "ShortLong", g_defaultPropChatPop);
+        g_PlayerDROption[client][propShortLong] = KvGetNum(KVSettings, "ShortLong", g_defaultPropShortLong);
     }
     else
     {
@@ -842,9 +907,12 @@ public void Event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
     // Display to all players who did the most damage this round
     if (mostDamage > 0)
     {
+        char damageName[DR_NAME_MAX_TOTAL + 1];
+        FormatPlayerName(damageName, sizeof(damageName), g_PlayerName[mostDamagePlayer]);
+
         PrintToChatAll(
             "\x04%s inflicted most damage, %d dmg in %d hits!",
-            g_PlayerName[mostDamagePlayer],
+            damageName,
             mostDamage,
             mostHits
         );
@@ -852,21 +920,38 @@ public void Event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
 
     if (mostKills > 0)
     {
+        char killsName[DR_NAME_MAX_TOTAL + 1];
+        FormatPlayerName(killsName, sizeof(killsName), g_PlayerName[mostKillsPlayer]);
+
         PrintToChatAll(
             "\x04Most kills:%s with %d kills",
-            g_PlayerName[mostKillsPlayer],
+            killsName,
             mostKills
         );
     }
 }
 
 
+void FormatPlayerName(char[] out, int outSize, const char[] name)
+{
+    if (strlen(name) <= DR_NAME_MAX_TOTAL)
+    {
+        strcopy(out, outSize, name);
+        return;
+    }
+
+    strcopy(out, outSize, name);
+    out[DR_NAME_TRUNCATE_AT] = '\0';
+    StrCat(out, outSize, "...");
+}
+
+
 public void clearAllDamageData()
 {
     // Clear all logged damage
-    for (int i = 1; i <= g_maxClients; i++)
+    for (int i = 0; i <= g_maxClients; i++)
     {
-        for (int j = 1; j <= g_maxClients; j++)
+        for (int j = 0; j <= g_maxClients; j++)
         {
             g_DamageDone[i][j]   = 0;
             g_DamageTaken[i][j]  = 0;
