@@ -82,6 +82,9 @@ char g_PlayerName[MAXPLAYERS + 1][32];
 
 int g_KilledPlayer[MAXPLAYERS + 1][MAXPLAYERS + 1];
 
+// Rows (first index) of the arrays above that hold data this round; only these are cleared
+bool g_RowUsed[MAXPLAYERS + 1];
+
 int g_PlayerDROption[MAXPLAYERS + 1][NROFOPTIONS];
 char g_filenameSettings[MAX_FILE_LEN];
 Handle KVSettings = INVALID_HANDLE;
@@ -107,6 +110,7 @@ ConVar g_cvPrefix;
 char g_Prefix[DR_PREFIX_MAX];
 ConVar g_cvAdminOnly;
 ConVar g_cvAdminFlags;
+int g_AdminFlagBits; // g_cvAdminFlags parsed, kept current by OnAdminFlagsChanged
 ConVar g_cvAwardsAdminOnly;
 ConVar g_cvPanelTitle;
 ConVar g_cvAwardsPrefix;
@@ -152,9 +156,12 @@ bool HasAwardAccess(int client)
 
 bool HasAdminFlags(int client)
 {
-    char flags[32];
-    g_cvAdminFlags.GetString(flags, sizeof(flags));
-    return CheckCommandAccess(client, "sm_damagereport_access", ReadFlagString(flags), true);
+    return CheckCommandAccess(client, "sm_damagereport_access", g_AdminFlagBits, true);
+}
+
+public void OnAdminFlagsChanged(ConVar convar, const char[] oldValue, const char[] newValue)
+{
+    g_AdminFlagBits = ReadFlagString(newValue);
 }
 
 void PrintPrefixed(int client, const char[] format, any ...)
@@ -250,6 +257,10 @@ public void OnPluginStart(){
 
   g_cvAdminOnly = CreateConVar("sm_damagereport_access_admin_only", "0", "Only admins with sm_damagereport_access_admin_flags get reports and commands <1|0>", _, true, 0.0, true, 1.0);
   g_cvAdminFlags = CreateConVar("sm_damagereport_access_admin_flags", "b", "Admin flags that give access when an admin_only cvar is 1, for example b or z");
+  char adminFlags[32];
+  g_cvAdminFlags.GetString(adminFlags, sizeof(adminFlags));
+  g_AdminFlagBits = ReadFlagString(adminFlags);
+  g_cvAdminFlags.AddChangeHook(OnAdminFlagsChanged);
   g_cvAwardsAdminOnly = CreateConVar("sm_damagereport_awards_admin_only", "0", "Only admins with sm_damagereport_access_admin_flags see the most damage and most kills lines <1|0>", _, true, 0.0, true, 1.0);
   g_cvAwardsPrefix = CreateConVar("sm_damagereport_awards_prefix", "theREG...", "Text shown before the most damage and most kills lines");
   g_cvAwardColor[Award_Prefix] = CreateConVar("sm_damagereport_awards_color_prefix", g_AwardColorDefault[Award_Prefix], "Hex color (RRGGBB) of the award prefix, for example theREG...");
@@ -581,6 +592,9 @@ public void Event_PlayerHurt(Event event, const char[] name, bool dontBroadcast)
 
     // --- ORIGINAL LOGIC (unchanged) ---
 
+    g_RowUsed[attacker] = true;
+    g_RowUsed[victim]   = true;
+
     // Damage done by attacker (including world = 0)
     g_DamageDone[attacker][victim] += healthDmg;
     g_HitsDone[attacker][victim]++;
@@ -615,6 +629,7 @@ public void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast
     if (attacker >= 0 && attacker <= g_maxClients)
     {
         g_KilledPlayer[attacker][victim] = 1;
+        g_RowUsed[attacker] = true;
     }
 
     if (g_PlayerDROption[victim][propOnOff] == DrON
@@ -631,12 +646,11 @@ public void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast
 // if any damage is taken or done a timer is called that will display a Panel with the info.
 public void BuildDamageString(int in_victim, int in_attacker)
 {
-    char damageReport[512];
-    char damageReportLong[600];
     char damageDone[512];
     char damageTaken[512];
     char damageDoneLong[512];
     char damageTakenLong[512];
+    int doneLen, takenLen, doneLongLen, takenLongLen;
     char killer[10];
     char xkiller[10];
     char killed[10];
@@ -644,13 +658,6 @@ public void BuildDamageString(int in_victim, int in_attacker)
 
     int totalDmgTaken = 0;
     int totalDmgDone  = 0;
-
-    damageReport[0]     = '\0';
-    damageReportLong[0] = '\0';
-    damageDone[0]       = '\0';
-    damageTaken[0]      = '\0';
-    damageDoneLong[0]   = '\0';
-    damageTakenLong[0]  = '\0';
 
     // Loop through all damage where you inflicted damage
     for (int i = 1; i <= g_maxClients; i++)
@@ -671,50 +678,19 @@ public void BuildDamageString(int in_victim, int in_attacker)
                 strcopy(xkilled, sizeof(xkilled), "--");
             }
 
-            Format(
-                damageDone, sizeof(damageDone),
-                "%s%s%s [%d dmg, %d hits]%s\n",
-                damageDone, xkilled, displayName,
+            AppendReportRow(
+                damageDone, sizeof(damageDone), doneLen,
+                damageDoneLong, sizeof(damageDoneLong), doneLongLen,
+                xkilled, displayName,
                 g_DamageDone[in_victim][i],
                 g_HitsDone[in_victim][i],
-                killed
+                killed,
+                g_HitboxDone[in_victim][i],
+                g_HitboxDamageDone[in_victim][i]
             );
-
-            Format(
-                damageDoneLong, sizeof(damageDoneLong),
-                "%s%s%s [%d dmg, %d hits]%s\n",
-                damageDoneLong, xkilled, displayName,
-                g_DamageDone[in_victim][i],
-                g_HitsDone[in_victim][i],
-                killed
-            );
-
-            Format(damageDoneLong, sizeof(damageDoneLong), "%s  ", damageDoneLong);
 
             totalDmgDone += g_DamageDone[in_victim][i];
-
-            for (int j = 0; j <= MAXHITGROUPS; j++)
-            {
-                if (g_HitboxDone[in_victim][i][j] > 0)
-                {
-                    Format(
-                        damageDoneLong, sizeof(damageDoneLong),
-                        "%s%s:%d (%d) ",
-                        damageDoneLong, g_HitboxName[j],
-                        g_HitboxDone[in_victim][i][j],
-                        g_HitboxDamageDone[in_victim][i][j]
-                    );
-                }
-            }
-
-            Format(damageDoneLong, sizeof(damageDoneLong), "%s\n", damageDoneLong);
         }
-    }
-
-    if (strcmp(damageDone, "", false) != 0)
-    {
-        Format(damageReport, sizeof(damageReport), "%s\n%s", "Damage done:", damageDone);
-        Format(damageReportLong, sizeof(damageReportLong), "%s\n%s", "Damage done:", damageDoneLong);
     }
 
     // Loop through all damage where you took damage
@@ -736,53 +712,22 @@ public void BuildDamageString(int in_victim, int in_attacker)
                 strcopy(xkiller, sizeof(xkiller), "--");
             }
 
-            Format(
-                damageTaken, sizeof(damageTaken),
-                "%s%s%s [%d dmg, %d hits]%s\n",
-                damageTaken, xkiller, displayName,
+            AppendReportRow(
+                damageTaken, sizeof(damageTaken), takenLen,
+                damageTakenLong, sizeof(damageTakenLong), takenLongLen,
+                xkiller, displayName,
                 g_DamageTaken[in_victim][i],
                 g_HitsTaken[in_victim][i],
-                killer
+                killer,
+                g_HitboxTaken[in_victim][i],
+                g_HitboxDamageTaken[in_victim][i]
             );
-
-            Format(
-                damageTakenLong, sizeof(damageTakenLong),
-                "%s%s%s [%d dmg, %d hits]%s\n",
-                damageTakenLong, xkiller, displayName,
-                g_DamageTaken[in_victim][i],
-                g_HitsTaken[in_victim][i],
-                killer
-            );
-
-            Format(damageTakenLong, sizeof(damageTakenLong), "%s  ", damageTakenLong);
 
             totalDmgTaken += g_DamageTaken[in_victim][i];
-
-            for (int j = 0; j <= MAXHITGROUPS; j++)
-            {
-                if (g_HitboxTaken[in_victim][i][j] > 0)
-                {
-                    Format(
-                        damageTakenLong, sizeof(damageTakenLong),
-                        "%s%s:%d (%d) ",
-                        damageTakenLong, g_HitboxName[j],
-                        g_HitboxTaken[in_victim][i][j],
-                        g_HitboxDamageTaken[in_victim][i][j]
-                    );
-                }
-            }
-
-            Format(damageTakenLong, sizeof(damageTakenLong), "%s\n", damageTakenLong);
         }
     }
 
-    if (strcmp(damageTaken, "", false) != 0)
-    {
-        Format(damageReport, sizeof(damageReport), "%s%s\n%s", damageReport, "Damage taken:", damageTaken);
-        Format(damageReportLong, sizeof(damageReportLong), "%s%s\n%s", damageReportLong, "Damage taken:", damageTakenLong);
-    }
-
-    if (strcmp(damageReport, "", false) != 0)
+    if (damageDone[0] != '\0' || damageTaken[0] != '\0')
     {
         strcopy(g_HistDamageDone[in_victim], sizeof(g_HistDamageDone[]), damageDone);
         strcopy(g_HistDamageDoneLong[in_victim], sizeof(g_HistDamageDoneLong[]), damageDoneLong);
@@ -802,6 +747,30 @@ public void BuildDamageString(int in_victim, int in_attacker)
             totalDmgTaken
         );
     }
+}
+
+
+// Appends one player's line to the short report and the line plus hitbox detail to the long one.
+// Each buffer keeps its length, so an append copies only the new text.
+void AppendReportRow(
+    char[] shortText, int shortSize, int &shortLen,
+    char[] longText, int longSize, int &longLen,
+    const char[] mark, const char[] name, int damage, int hits, const char[] tag,
+    const int[] hitboxHits, const int[] hitboxDamage
+)
+{
+    shortLen += Format(shortText[shortLen], shortSize - shortLen, "%s%s [%d dmg, %d hits]%s\n", mark, name, damage, hits, tag);
+    longLen  += Format(longText[longLen], longSize - longLen, "%s%s [%d dmg, %d hits]%s\n  ", mark, name, damage, hits, tag);
+
+    for (int j = 0; j <= MAXHITGROUPS; j++)
+    {
+        if (hitboxHits[j] > 0)
+        {
+            longLen += Format(longText[longLen], longSize - longLen, "%s:%d (%d) ", g_HitboxName[j], hitboxHits[j], hitboxDamage[j]);
+        }
+    }
+
+    longLen += Format(longText[longLen], longSize - longLen, "\n");
 }
 
 
@@ -1228,6 +1197,12 @@ public void clearAllDamageData()
     // Clear all logged damage
     for (int i = 0; i <= g_maxClients; i++)
     {
+        if (!g_RowUsed[i])
+        {
+            continue;
+        }
+        g_RowUsed[i] = false;
+
         for (int j = 0; j <= g_maxClients; j++)
         {
             g_DamageDone[i][j]   = 0;
