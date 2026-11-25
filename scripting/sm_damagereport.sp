@@ -26,7 +26,23 @@
 #define DR_NAME_MAX_TOTAL   21
 #define DR_NAME_TRUNCATE_AT 18
 #define DR_PREFIX_MAX       32
+#define DR_TITLE_MAX        64
 #define DR_MENU_RETRY_MAX 8  // 8 * 1s = 8s max wait
+#define DR_CHAT_MAX 256
+
+// CS:S chat color codes; \x07 takes a 6-digit hex color
+#define DR_COLOR_PREFIX "\x04"
+#define DR_COLOR_TEXT   "\x01"
+#define DR_HEX_COLOR_LEN 7
+
+enum AwardPart
+{
+    Award_Prefix,
+    Award_Label,
+    Award_Name,
+    Award_Stat,
+    AWARD_PARTS
+}
 
 #define DrON  1
 #define DrOFF 0
@@ -84,6 +100,13 @@ int  g_HistTotalDamageTaken[MAXPLAYERS + 1];
 ConVar g_versionConVar;
 ConVar g_cvPrefix;
 char g_Prefix[DR_PREFIX_MAX];
+ConVar g_cvAdminOnly;
+ConVar g_cvAdminFlags;
+ConVar g_cvAwardsAdminOnly;
+ConVar g_cvPanelTitle;
+ConVar g_cvAwardsPrefix;
+ConVar g_cvAwardColor[AWARD_PARTS];
+char g_AwardColorDefault[AWARD_PARTS][DR_HEX_COLOR_LEN] = { "40FF40", "FF4040", "99CCFF", "FFD700" };
 
 int g_maxClients;
 
@@ -112,6 +135,102 @@ public void OnConfigsExecuted()
     InstCfg_Apply();
 }
 
+bool HasReportAccess(int client)
+{
+    return !g_cvAdminOnly.BoolValue || HasAdminFlags(client);
+}
+
+bool HasAwardAccess(int client)
+{
+    return !g_cvAwardsAdminOnly.BoolValue || HasAdminFlags(client);
+}
+
+bool HasAdminFlags(int client)
+{
+    char flags[32];
+    g_cvAdminFlags.GetString(flags, sizeof(flags));
+    return CheckCommandAccess(client, "sm_damagereport_access", ReadFlagString(flags), true);
+}
+
+void PrintPrefixed(int client, const char[] format, any ...)
+{
+    char text[DR_CHAT_MAX];
+    VFormat(text, sizeof(text), format, 3);
+    PrintToChat(client, DR_COLOR_PREFIX ... "%s " ... DR_COLOR_TEXT ... "%s", g_Prefix, text);
+}
+
+bool IsHexColor(const char[] value)
+{
+    if (strlen(value) != DR_HEX_COLOR_LEN - 1)
+    {
+        return false;
+    }
+
+    for (int i = 0; i < DR_HEX_COLOR_LEN - 1; i++)
+    {
+        int c = CharToLower(value[i]);
+        if (!IsCharNumeric(c) && (c < 'a' || c > 'f'))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+public void OnAwardColorChanged(ConVar convar, const char[] oldValue, const char[] newValue)
+{
+    if (IsHexColor(newValue))
+    {
+        return;
+    }
+
+    for (int part = 0; part < view_as<int>(AWARD_PARTS); part++)
+    {
+        if (convar == g_cvAwardColor[part])
+        {
+            char name[64];
+            convar.GetName(name, sizeof(name));
+            LogError("%s \"%s\" is not a 6-digit hex color such as FFD700; using %s", name, newValue, g_AwardColorDefault[part]);
+            convar.SetString(g_AwardColorDefault[part]);
+        }
+    }
+}
+
+void GetAwardColor(AwardPart part, char[] out, int outSize)
+{
+    char hex[DR_HEX_COLOR_LEN];
+    g_cvAwardColor[part].GetString(hex, sizeof(hex));
+    Format(out, outSize, "\x07%s", hex);
+}
+
+// Example: theREG...>DMG<: Alpha, 158 dmg in 3 hits
+void PrintAwardToAll(const char[] label, const char[] playerName, const char[] format, any ...)
+{
+    char stat[DR_CHAT_MAX];
+    VFormat(stat, sizeof(stat), format, 4);
+
+    char awardsPrefix[DR_PREFIX_MAX];
+    g_cvAwardsPrefix.GetString(awardsPrefix, sizeof(awardsPrefix));
+
+    char color[AWARD_PARTS][DR_HEX_COLOR_LEN + 1];
+    for (int part = 0; part < view_as<int>(AWARD_PARTS); part++)
+    {
+        GetAwardColor(view_as<AwardPart>(part), color[part], sizeof(color[]));
+    }
+
+    for (int i = 1; i <= g_maxClients; i++)
+    {
+        if (IsClientInGame(i) && !IsFakeClient(i) && HasAwardAccess(i))
+        {
+            PrintToChat(i, "%s%s%s>%s<: %s%s%s%s",
+                color[Award_Prefix], awardsPrefix,
+                color[Award_Label], label,
+                color[Award_Name], playerName,
+                color[Award_Stat], stat);
+        }
+    }
+}
+
 // Hook events on plugin start
 public void OnPluginStart(){
   g_maxClients = MaxClients;
@@ -124,8 +243,28 @@ public void OnPluginStart(){
   g_cvPrefix.GetString(g_Prefix, sizeof(g_Prefix));
   g_cvPrefix.AddChangeHook(OnPrefixChanged);
 
+  g_cvAdminOnly = CreateConVar("sm_damagereport_access_admin_only", "0", "Only admins with sm_damagereport_access_admin_flags get reports and commands <1|0>", _, true, 0.0, true, 1.0);
+  g_cvAdminFlags = CreateConVar("sm_damagereport_access_admin_flags", "b", "Admin flags that give access when an admin_only cvar is 1, for example b or z");
+  g_cvAwardsAdminOnly = CreateConVar("sm_damagereport_awards_admin_only", "0", "Only admins with sm_damagereport_access_admin_flags see the most damage and most kills lines <1|0>", _, true, 0.0, true, 1.0);
+  g_cvAwardsPrefix = CreateConVar("sm_damagereport_awards_prefix", "theREG...", "Text shown before the most damage and most kills lines");
+  g_cvAwardColor[Award_Prefix] = CreateConVar("sm_damagereport_awards_color_prefix", g_AwardColorDefault[Award_Prefix], "Hex color (RRGGBB) of the award prefix, for example theREG...");
+  g_cvAwardColor[Award_Label] = CreateConVar("sm_damagereport_awards_color_label", g_AwardColorDefault[Award_Label], "Hex color (RRGGBB) of the award label, >DMG<: and >KILLS<:");
+  g_cvAwardColor[Award_Name] = CreateConVar("sm_damagereport_awards_color_name", g_AwardColorDefault[Award_Name], "Hex color (RRGGBB) of the player name in the award lines");
+  g_cvAwardColor[Award_Stat] = CreateConVar("sm_damagereport_awards_color_stat", g_AwardColorDefault[Award_Stat], "Hex color (RRGGBB) of the numbers in the award lines");
+  g_cvPanelTitle = CreateConVar("sm_damagereport_panel_title", "theREG...DMGreport:", "Title line of the report panel");
+
   // configs/sm_damagereport.cfg (named after the plugin file); the version cvar stays out of it
   InstCfg_Add(g_cvPrefix);
+  InstCfg_Add(g_cvAdminOnly);
+  InstCfg_Add(g_cvAdminFlags);
+  InstCfg_Add(g_cvAwardsAdminOnly);
+  InstCfg_Add(g_cvAwardsPrefix);
+  for (int part = 0; part < view_as<int>(AWARD_PARTS); part++)
+  {
+    g_cvAwardColor[part].AddChangeHook(OnAwardColorChanged);
+    InstCfg_Add(g_cvAwardColor[part]);
+  }
+  InstCfg_Add(g_cvPanelTitle);
   InstCfg_Ensure();
 
   HookEvent("player_death", Event_PlayerDeath);
@@ -158,10 +297,17 @@ public void OnPluginStart(){
   if (g_lateLoaded)
   {
       // Plugin was not loaded at beginning of round
-      // Find settings for all players already connected
+      // Find settings and names for all players already connected; names are otherwise stored at spawn
       for (int i = 1; i <= g_maxClients; i++)
       {
-          if (IsClientInGame(i) && !IsFakeClient(i))
+          if (!IsClientInGame(i))
+          {
+              continue;
+          }
+
+          GetClientName(i, g_PlayerName[i], sizeof(g_PlayerName[]));
+
+          if (!IsFakeClient(i))
           {
               FindSettingsForClient(i);
           }
@@ -188,6 +334,20 @@ public Action Command_LastDamageReport(int client, int args)
         return Plugin_Handled;
     }
 
+    if (!HasReportAccess(client))
+    {
+        PrintPrefixed(client, "Damage report is for admins only");
+        return Plugin_Handled;
+    }
+
+    char option[20];
+    GetCmdArg(1, option, sizeof(option));
+    if (StrEqual(option, "help", false))
+    {
+        PrintHelp(client);
+        return Plugin_Handled;
+    }
+
     if ((g_HistDamageDone[client][0] != '\0') || (g_HistDamageTaken[client][0] != '\0'))
     {
         DisplayDamageReport(
@@ -202,7 +362,7 @@ public Action Command_LastDamageReport(int client, int args)
     }
     else
     {
-        PrintToChat(client, "\x04%s No history to display", g_Prefix);
+        PrintPrefixed(client, "No history to display");
     }
 
     return Plugin_Handled;
@@ -216,10 +376,16 @@ public Action Command_DamageReport(int client, int args)
         return Plugin_Handled;
     }
 
+    if (!HasReportAccess(client))
+    {
+        PrintPrefixed(client, "Damage report is for admins only");
+        return Plugin_Handled;
+    }
+
     // If too few or too many arguments
     if (args != 1)
     {
-        PrintToChat(client, "\x04%s Usage: /drs help", g_Prefix);
+        PrintPrefixed(client, "Usage: /dr help");
         return Plugin_Handled;
     }
 
@@ -229,68 +395,71 @@ public Action Command_DamageReport(int client, int args)
     if (StrEqual(option, "on", false))
     {
         g_PlayerDROption[client][propOnOff] = DrON;
-        PrintToChat(client, "\x04%s Damage report switched on", g_Prefix);
+        PrintPrefixed(client, "Damage report switched on");
     }
     else if (StrEqual(option, "off", false))
     {
         g_PlayerDROption[client][propOnOff] = DrOFF;
-        PrintToChat(client, "\x04%s Damage report switched off", g_Prefix);
+        PrintPrefixed(client, "Damage report switched off");
     }
     else if (StrEqual(option, "popup", false))
     {
         g_PlayerDROption[client][propPopChat] = DrPop;
-        PrintToChat(client, "\x04%s Damage report printed in popup menu", g_Prefix);
+        PrintPrefixed(client, "Damage report printed in popup menu");
     }
     else if (StrEqual(option, "chat", false))
     {
         g_PlayerDROption[client][propPopChat] = DrChat;
-        PrintToChat(client, "\x04%s Damage report printed in chat", g_Prefix);
+        PrintPrefixed(client, "Damage report printed in chat");
     }
     else if (StrEqual(option, "short", false))
     {
         g_PlayerDROption[client][propShortLong] = DrShort;
-        PrintToChat(client, "\x04%s Hitbox data will not be shown", g_Prefix);
+        PrintPrefixed(client, "Hitbox data will not be shown");
     }
     else if (StrEqual(option, "long", false))
     {
         g_PlayerDROption[client][propShortLong] = DrLong;
-        PrintToChat(client, "\x04%s Hitbox data will be shown", g_Prefix);
+        PrintPrefixed(client, "Hitbox data will be shown");
     }
     else if (StrEqual(option, "status", false))
     {
         if (g_PlayerDROption[client][propOnOff] == DrON)
         {
-            PrintToChat(client, "\x04%s Damage report is switched on", g_Prefix);
+            PrintPrefixed(client, "Damage report is switched on");
 
             if (g_PlayerDROption[client][propPopChat] == DrPop)
-                PrintToChat(client, "\x04%s Damage report is printed in popup menu", g_Prefix);
+                PrintPrefixed(client, "Damage report is printed in popup menu");
             else
-                PrintToChat(client, "\x04%s Damage report is printed in chat", g_Prefix);
+                PrintPrefixed(client, "Damage report is printed in chat");
 
             if (g_PlayerDROption[client][propShortLong] == DrShort)
-                PrintToChat(client, "\x04%s Hitbox data is not shown", g_Prefix);
+                PrintPrefixed(client, "Hitbox data is not shown");
             else
-                PrintToChat(client, "\x04%s Hitbox data is shown", g_Prefix);
+                PrintPrefixed(client, "Hitbox data is shown");
         }
         else
         {
-            PrintToChat(client, "\x04%s Damage report is switched off", g_Prefix);
+            PrintPrefixed(client, "Damage report is switched off");
         }
     }
     else
     {
-        PrintToChat(client, "\x04%s /drs on (Turn it on)", g_Prefix);
-        PrintToChat(client, "\x04%s /drs off (Turn it off)", g_Prefix);
-        PrintToChat(client, "\x04%s /drs popup (Popup menu)", g_Prefix);
-        PrintToChat(client, "\x04%s /drs chat (Chat output)", g_Prefix);
-        PrintToChat(client, "\x04%s /drs short (Hide hitbox info)", g_Prefix);
-        PrintToChat(client, "\x04%s /drs long (Show hitbox info)", g_Prefix);
-        PrintToChat(client, "\x04%s /drs status (Show current settings)", g_Prefix);
-        PrintToChat(client, "\x04%s /dr or /ldr or /dmg (Show last report)", g_Prefix);
+        PrintHelp(client);
     }
 
     StoreSettingsForClient(client);
     return Plugin_Handled;
+}
+
+void PrintHelp(int client)
+{
+    PrintPrefixed(client, "/dr (Show your last report)");
+    PrintPrefixed(client, "/dr help (This list)");
+    PrintPrefixed(client, "/drs on, /drs off (Turn your report on or off)");
+    PrintPrefixed(client, "/drs popup, /drs chat (Show it in a panel or in chat)");
+    PrintPrefixed(client, "/drs long, /drs short (Show or hide hitbox info)");
+    PrintPrefixed(client, "/drs status (Show your settings)");
 }
 
 
@@ -399,8 +568,9 @@ public void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast
     }
 
     if (g_PlayerDROption[victim][propOnOff] == DrON
+        && IsClientInGame(victim)
         && !IsFakeClient(victim)
-        && IsClientInGame(victim))
+        && HasReportAccess(victim))
     {
         BuildDamageString(victim, attacker);
     }
@@ -635,21 +805,13 @@ public void DisplayDamageReport(
     {
         if (damageDoneLong[0] != '\0')
         {
-            PrintToChat(
-                in_victim,
-                "\x04\n--Victims (Total dmg:%d)--\n",
-                totalDmgDone
-            );
+            PrintPrefixed(in_victim, "--Victims (Total dmg:%d)--", totalDmgDone);
             PrintToChat(in_victim, "\x04%s", damageDoneLong);
         }
 
         if (damageTakenLong[0] != '\0')
         {
-            PrintToChat(
-                in_victim,
-                "\x04--Attackers (Total dmg:%d)--\n",
-                totalDmgTaken
-            );
+            PrintPrefixed(in_victim, "--Attackers (Total dmg:%d)--", totalDmgTaken);
             PrintToChat(in_victim, "\x04%s", damageTakenLong);
         }
     }
@@ -695,6 +857,10 @@ public Action DisplayDamageReportMenu(Handle timer, DataPack pack)
 
     Panel damageReportPanel = new Panel();
 
+    char title[DR_TITLE_MAX];
+    g_cvPanelTitle.GetString(title, sizeof(title));
+    damageReportPanel.SetTitle(title);
+
     if (p_damageDone[0] != '\0')
     {
         Format(victimItem, sizeof(victimItem), "Victims (Total dmg:%d)", p_totalDmgDone);
@@ -710,7 +876,7 @@ public Action DisplayDamageReportMenu(Handle timer, DataPack pack)
     }
 
     damageReportPanel.DrawItem("Exit");
-    damageReportPanel.DrawText("Type \"/damage_report help\" in chat for settings");
+    damageReportPanel.DrawText("Type \"/dr help\" in chat for commands");
 
     damageReportPanel.Send(p_victim, Handler_MyPanel, 8);
     delete damageReportPanel;
@@ -883,7 +1049,8 @@ public void Event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
             if (g_PlayerDROption[i][propOnOff] == DrON
                 && IsClientConnected(i)
                 && !IsFakeClient(i)
-                && IsPlayerAlive(i))
+                && IsPlayerAlive(i)
+                && HasReportAccess(i))
             {
                 BuildDamageString(i, -1);
             }
@@ -934,11 +1101,13 @@ public void Event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
         char damageName[DR_NAME_MAX_TOTAL + 1];
         FormatPlayerName(damageName, sizeof(damageName), g_PlayerName[mostDamagePlayer]);
 
-        PrintToChatAll(
-            "\x04%s inflicted most damage, %d dmg in %d hits!",
+        PrintAwardToAll(
+            "DMG",
             damageName,
+            ", %d dmg in %d %s",
             mostDamage,
-            mostHits
+            mostHits,
+            mostHits == 1 ? "hit" : "hits"
         );
     }
 
@@ -947,10 +1116,12 @@ public void Event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
         char killsName[DR_NAME_MAX_TOTAL + 1];
         FormatPlayerName(killsName, sizeof(killsName), g_PlayerName[mostKillsPlayer]);
 
-        PrintToChatAll(
-            "\x04Most kills:%s with %d kills",
+        PrintAwardToAll(
+            "KILLS",
             killsName,
-            mostKills
+            ", %d %s",
+            mostKills,
+            mostKills == 1 ? "kill" : "kills"
         );
     }
 }
