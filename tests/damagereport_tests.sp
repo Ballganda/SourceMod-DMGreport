@@ -729,12 +729,14 @@ void Case_ChatMode(int step)
 				EndCase(false, "no Attackers header with 540 dmg in chat");
 			else if (!ChatHas("X " ... FAKE_ATTACKER ... " [540 dmg, 3 hits] (Killer)"))
 				EndCase(false, "attacker line lacks X, 540 dmg, 3 hits or (Killer)");
+			else if (!ChatHas("Body:3 (540)"))
+				EndCase(false, "no hits and damage per body part (Body:3 (540)) in the long report");
 			else if (ChatHas("--Victims"))
 				EndCase(false, "Victims section though the human hit no one");
 			else if (panel)
 				EndCase(false, "a panel was shown in chat mode");
 			else
-				EndCase(true, "report in chat with X, 540 dmg, 3 hits, (Killer); no panel");
+				EndCase(true, "report in chat with X, 540 dmg, 3 hits, (Killer), Body:3 (540); no panel");
 		}
 	}
 }
