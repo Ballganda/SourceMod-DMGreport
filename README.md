@@ -25,7 +25,7 @@ Requires SourceMod 1.12 or later.
 | --- | --- |
 | `/drs` (or `/damage_report`) `on`, `off` | Turns your report on or off. |
 | `/drs popup`, `/drs chat` | Shows the report in a panel or in chat. |
-| `/drs long`, `/drs short` | Shows or hides the hitbox details. |
+| `/drs long`, `/drs short` | Shows or hides the hits and damage per body part, for example `Head:1 (98) Chest:2 (54)`. |
 | `/drs status` | Shows your settings. |
 | `/dr` (or `/ldr`, `/dmg`, `/last_damage_report`) | Shows your last report again. |
 | `/dr help` | Lists the commands. |
@@ -136,6 +136,7 @@ Notes:
 - New cvars `sm_damagereport_access_admin_only` and `sm_damagereport_access_admin_flags`: admin-only mode. See **Cvars**.
 - New cvar `sm_damagereport_awards_admin_only`: the round awards go to every player or only to admins.
 - New cvar `sm_damagereport_panel_title` (default `theREG...DMGreport:`): the title line of the report panel.
+- The long report shows the damage per body part after the hit count: `Head:1 (98) Chest:2 (54)`. Before, it showed only the hits.
 - `/dr help` lists the commands. The panel footer says `Type "/dr help" in chat for commands`.
 - Fixed: after a plugin reload during a map, the report and the awards showed empty player names.
 

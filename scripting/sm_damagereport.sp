@@ -70,10 +70,12 @@ public Plugin myinfo =
 int g_DamageDone[MAXPLAYERS + 1][MAXPLAYERS + 1];
 int g_HitsDone[MAXPLAYERS + 1][MAXPLAYERS + 1];
 int g_HitboxDone[MAXPLAYERS + 1][MAXPLAYERS + 1][MAXHITGROUPS + 1];
+int g_HitboxDamageDone[MAXPLAYERS + 1][MAXPLAYERS + 1][MAXHITGROUPS + 1];
 
 int g_DamageTaken[MAXPLAYERS + 1][MAXPLAYERS + 1];
 int g_HitsTaken[MAXPLAYERS + 1][MAXPLAYERS + 1];
 int g_HitboxTaken[MAXPLAYERS + 1][MAXPLAYERS + 1][MAXHITGROUPS + 1];
+int g_HitboxDamageTaken[MAXPLAYERS + 1][MAXPLAYERS + 1][MAXHITGROUPS + 1];
 
 char g_PlayerName[MAXPLAYERS + 1][32];
 
@@ -537,11 +539,13 @@ public void Event_PlayerHurt(Event event, const char[] name, bool dontBroadcast)
     g_DamageDone[attacker][victim] += healthDmg;
     g_HitsDone[attacker][victim]++;
     g_HitboxDone[attacker][victim][hitgroup]++;
+    g_HitboxDamageDone[attacker][victim][hitgroup] += healthDmg;
 
     // Damage taken by victim
     g_DamageTaken[victim][attacker] += healthDmg;
     g_HitsTaken[victim][attacker]++;
     g_HitboxTaken[victim][attacker][hitgroup]++;
+    g_HitboxDamageTaken[victim][attacker][hitgroup] += healthDmg;
 }
 
 
@@ -649,9 +653,10 @@ public void BuildDamageString(int in_victim, int in_attacker)
                 {
                     Format(
                         damageDoneLong, sizeof(damageDoneLong),
-                        "%s%s:%d ",
+                        "%s%s:%d (%d) ",
                         damageDoneLong, g_HitboxName[j],
-                        g_HitboxDone[in_victim][i][j]
+                        g_HitboxDone[in_victim][i][j],
+                        g_HitboxDamageDone[in_victim][i][j]
                     );
                 }
             }
@@ -713,9 +718,10 @@ public void BuildDamageString(int in_victim, int in_attacker)
                 {
                     Format(
                         damageTakenLong, sizeof(damageTakenLong),
-                        "%s%s:%d ",
+                        "%s%s:%d (%d) ",
                         damageTakenLong, g_HitboxName[j],
-                        g_HitboxTaken[in_victim][i][j]
+                        g_HitboxTaken[in_victim][i][j],
+                        g_HitboxDamageTaken[in_victim][i][j]
                     );
                 }
             }
@@ -1156,8 +1162,10 @@ public void clearAllDamageData()
 
             for (int k = 0; k <= MAXHITGROUPS; k++)
             {
-                g_HitboxDone[i][j][k]  = 0;
-                g_HitboxTaken[i][j][k] = 0;
+                g_HitboxDone[i][j][k]        = 0;
+                g_HitboxTaken[i][j][k]       = 0;
+                g_HitboxDamageDone[i][j][k]  = 0;
+                g_HitboxDamageTaken[i][j][k] = 0;
             }
         }
     }
