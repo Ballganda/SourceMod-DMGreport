@@ -8,6 +8,27 @@ original work by:
     
 Shows a left side menu when you die or at the end of the round, saying who you did and took damage from and how much, including how many hits and who killed you.
 
+## Install
+
+1. Download `sm_damagereport-<version>.zip` from the [latest release](https://github.com/Ballganda/SourceMod-DMGreport/releases/latest) and extract it into the server's `cstrike` folder. It contains:
+   - `addons/sourcemod/plugins/sm_damagereport.smx`: the plugin
+   - `addons/sourcemod/scripting/sm_damagereport.sp` and `scripting/include/instance_config.inc`: the source, needed only to recompile
+   - `addons/sourcemod/scripting/sm_damagereport-LICENSE.txt`: the GPL v3 license text
+2. Restart the server or change the map.
+3. Check: `sm plugins list` shows `Damage report (<version>)`.
+
+Requires SourceMod 1.12 or later.
+
+## Player commands
+
+| Command | Does |
+| --- | --- |
+| `/drs` (or `/damage_report`) `on`, `off` | Turns your report on or off. |
+| `/drs popup`, `/drs chat` | Shows the report in a panel or in chat. |
+| `/drs long`, `/drs short` | Shows or hides the hitbox details. |
+| `/drs status`, `/drs help` | Shows your settings, or lists the commands. |
+| `/dr` (or `/ldr`, `/dmg`, `/last_damage_report`) | Shows your last report again. |
+
 ## Configuration
 
 ### Cvars
@@ -86,6 +107,25 @@ Notes:
 - `CSS_SERVER_DIR` and `CSS_CLIENT_DIR` set the server and client folders.
 - The panel cases check that the report panel is open. A plugin cannot read the text of a SourceMod panel. The chat-mode case checks the report text, which is the same text the panel shows.
 - The config cases write their own `configs/sm_damagereport.cfg` and reload the plugin. Each case puts the file back when it ends.
+
+## Changes in 2.1.0
+
+Changes since 2.0.0-b1:
+
+- The plugin is licensed under GPL v3, as SourceMod requires. `sm_damagereport.sp` starts with the GPL notice, and the release zip has the license text.
+- New cvar `sm_damagereport_prefix` (default `[theREG...]`): the text before every chat message of the plugin.
+- Settings are kept in `addons/sourcemod/configs/sm_damagereport.cfg`, one file per SourceMod folder. See **Config file**.
+- The player settings moved from `data/damagereportsetting.txt` to `configs/damagereportusersettings.cfg`. The plugin copies an old file across the first time it loads.
+- New command `/drs`, the same as `/damage_report`.
+- `/dr` now shows the last report, the same as `/ldr`. Before, it was the same as `/damage_report`. New command `/dmg` also shows the last report.
+- Damage from the world (falls, the bomb) is listed as `WORLD`.
+- Long player names are shortened so the report lines stay readable.
+- Hits that do no damage are not counted.
+- The short or long choice of a player without saved settings now defaults to long. Before, it took the popup or chat default by mistake.
+- The plugin stops trying to show the report panel after 8 seconds when another menu stays open.
+- Out-of-range client indexes from events are ignored.
+
+Tested: regression suite with the real CS:S client (`test.ps1 -WithClient`), 12 passed, 0 failed, 0 skipped.
 
 ## License
 
