@@ -1,0 +1,771 @@
+﻿// Regression suite for sm_damagereport.smx (Panel version).
+// Run by hand with "dr_test" on the server console, or unattended with +dr_test_autorun 1 (test.ps1).
+// Results go to logs/damagereport_tests.log. Cases marked "real client" need a human player and SKIP without one.
+#include <sourcemod>
+#include <sdktools>
+#include <sdkhooks>
+#include <cstrike>
+
+#pragma semicolon 1
+#pragma newdecls required
+
+#define PLUGIN_FILE "sm_damagereport.smx"
+#define SETTINGS_FILE "configs/damagereportusersettings.cfg"
+#define NAME_LEN 96
+#define CAPTURE_LEN 4096
+#define MAX_ATTEMPTS 3 // a case is rerun if the game restarted the round under it
+#define STEP_SLOTS 100 // steps per case in a timer value
+#define FAKE_ATTACKER "DRFakeAttacker"
+#define FAKE_VICTIM "DRFakeVictim"
+#define HIT_DAMAGE 20.0
+#define KILL_DAMAGE 500.0
+// The plugin shows its panel 1 s after death and retries each second while another menu is open.
+#define REPORT_WAIT 3.0
+
+enum
+{
+	C_LOADED,
+	C_SETTINGS_FILE,
+	C_FAKE_FIGHT,
+	C_DEATH_PANEL,
+	C_LAST_REPORT,
+	C_HELP,
+	C_CHAT_MODE,
+	C_OFF,
+	C_ROUND_END_ALIVE,
+	NUM_CASES
+}
+
+char g_caseNames[NUM_CASES][NAME_LEN];
+bool g_needsClient[NUM_CASES];
+char g_logPath[PLATFORM_MAX_PATH];
+
+int g_curCase = -1;
+bool g_caseActive;
+bool g_running;
+int g_pass;
+int g_fail;
+int g_skip;
+int g_attempt = 1;
+int g_waited;
+int g_errSizeAtStart;
+bool g_selfFire;
+bool g_interfered;
+int g_origIgnoreWin = -1;
+int g_origAutokick = -1;
+
+int g_uidAttacker;
+int g_uidVictim;
+
+// Chat a real client was sent during the case (SayText*, TextMsg).
+char g_chatText[CAPTURE_LEN];
+bool g_menuBeforeKill;
+
+ConVar g_cvAutorun;
+ConVar g_cvInjectError;
+ConVar g_cvWaitClient;
+
+public Plugin myinfo =
+{
+	name = "Damage report tests",
+	author = "test",
+	description = "Regression tests for sm_damagereport",
+	version = "1.0.0",
+	url = ""
+};
+
+public void OnPluginStart()
+{
+	BuildPath(Path_SM, g_logPath, sizeof(g_logPath), "logs/damagereport_tests.log");
+
+	SetCase(C_LOADED, "plugin running, cvars and commands exist", false);
+	SetCase(C_SETTINGS_FILE, "settings file created in SourceMod configs", false);
+	SetCase(C_FAKE_FIGHT, "fake vs fake damage, death, world damage, round end raise no error", false);
+	SetCase(C_DEATH_PANEL, "real client: killed player gets the report panel", true);
+	SetCase(C_LAST_REPORT, "real client: dr shows the last report again", true);
+	SetCase(C_HELP, "real client: drs help lists the commands", true);
+	SetCase(C_CHAT_MODE, "real client: drs chat prints the report in chat, no panel", true);
+	SetCase(C_OFF, "real client: drs off shows no report", true);
+	SetCase(C_ROUND_END_ALIVE, "real client: alive player gets report panel and most-damage chat at round end", true);
+
+	RegServerCmd("dr_test", Cmd_RunTests, "Run the damage report regression tests");
+	g_cvAutorun = CreateConVar("dr_test_autorun", "0", "Run the suite on map start and quit when done <1|0>.", FCVAR_NONE, true, 0.0, true, 1.0);
+	g_cvInjectError = CreateConVar("dr_test_inject_error", "0", "Log a deliberate error to prove error detection <1|0>.", FCVAR_NONE, true, 0.0, true, 1.0);
+	g_cvWaitClient = CreateConVar("dr_test_wait_client", "0", "Autorun waits up to 180 s for a real client <1|0>.", FCVAR_NONE, true, 0.0, true, 1.0);
+
+	static const char chatMsgs[][] = { "SayText", "SayText2", "TextMsg" };
+	for (int i = 0; i < sizeof(chatMsgs); i++)
+	{
+		UserMsg id = GetUserMessageId(chatMsgs[i]);
+		if (id != INVALID_MESSAGE_ID)
+			HookUserMessage(id, OnChatMsg);
+	}
+	HookEvent("round_start", OnRoundStartSeen, EventHookMode_PostNoCopy);
+}
+
+void SetCase(int c, const char[] name, bool needsClient)
+{
+	strcopy(g_caseNames[c], NAME_LEN, name);
+	g_needsClient[c] = needsClient;
+}
+
+//===== Capture =====
+
+bool SentToHuman(const int[] players, int playersNum)
+{
+	for (int i = 0; i < playersNum; i++)
+		if (!IsFakeClient(players[i]))
+			return true;
+	return false;
+}
+
+public Action OnChatMsg(UserMsg id, BfRead bf, const int[] players, int playersNum, bool reliable, bool init)
+{
+	if (!g_caseActive || !SentToHuman(players, playersNum))
+		return Plugin_Continue;
+	// The layout differs per message type, so keep the raw payload.
+	char raw[512];
+	int n = 0;
+	while (bf.BytesLeft > 0 && n < sizeof(raw) - 2)
+	{
+		int b = bf.ReadByte();
+		raw[n++] = view_as<char>((b == 0) ? 32 : b);
+	}
+	raw[n++] = '\n';
+	raw[n] = '\0';
+	StrCat(g_chatText, sizeof(g_chatText), raw);
+	return Plugin_Continue;
+}
+
+void ResetCapture()
+{
+	g_chatText[0] = '\0';
+}
+
+bool ChatHas(const char[] text)
+{
+	return StrContains(g_chatText, text) != -1;
+}
+
+//===== Suite control =====
+
+public void OnRoundStartSeen(Event event, const char[] name, bool dontBroadcast)
+{
+	if (g_running && g_caseActive && !g_selfFire)
+		g_interfered = true;
+}
+
+public void OnMapStart()
+{
+	if (g_cvAutorun.BoolValue && !g_running)
+		CreateTimer(15.0, Timer_Autorun, _, TIMER_FLAG_NO_MAPCHANGE);
+}
+
+public Action Timer_Autorun(Handle timer)
+{
+	if (g_cvWaitClient.BoolValue && FindHuman() == 0 && g_waited < 180)
+	{
+		g_waited += 2;
+		CreateTimer(2.0, Timer_Autorun, _, TIMER_FLAG_NO_MAPCHANGE);
+		return Plugin_Stop;
+	}
+	if (g_cvWaitClient.BoolValue && g_waited >= 0 && FindHuman() != 0)
+	{
+		g_waited = -1; // let the client finish loading in
+		CreateTimer(8.0, Timer_Autorun, _, TIMER_FLAG_NO_MAPCHANGE);
+		return Plugin_Stop;
+	}
+	Cmd_RunTests(0);
+	return Plugin_Stop;
+}
+
+public void OnPluginEnd()
+{
+	CleanupFakes();
+	g_running = false;
+	RestoreCvars();
+}
+
+public Action Cmd_RunTests(int args)
+{
+	if (g_running)
+	{
+		PrintToServer("[dr_test] already running");
+		return Plugin_Handled;
+	}
+	// Fakes joining or dying would otherwise end the round and restart it under a later case.
+	g_origIgnoreWin = SwapCvarInt("mp_ignore_round_win_conditions", 1);
+	// The real client is idle on purpose.
+	g_origAutokick = SwapCvarInt("mp_autokick", 0);
+
+	g_running = true;
+	g_attempt = 1;
+	g_pass = 0;
+	g_fail = 0;
+	g_skip = 0;
+	LogToFileEx(g_logPath, "=== damage report tests started (%d cases) ===", NUM_CASES);
+	if (g_cvInjectError.BoolValue)
+		LogError("[dr_test] deliberate error (dr_test_inject_error 1)");
+	StartCase(0);
+	return Plugin_Handled;
+}
+
+void StartCase(int c)
+{
+	g_curCase = c;
+	g_interfered = false;
+	g_errSizeAtStart = ErrorLogSize();
+	if (g_needsClient[c] && FindHuman() == 0)
+	{
+		g_caseActive = true;
+		SkipCase("no real client in game");
+		return;
+	}
+	g_caseActive = true;
+	FireNamedEvent("round_start"); // the plugin clears all damage on round_start
+	ResetCapture();
+	RunStep(c, 0);
+}
+
+void Schedule(float delay, int c, int step)
+{
+	CreateTimer(delay, Timer_Step, c * STEP_SLOTS + step, TIMER_FLAG_NO_MAPCHANGE);
+}
+
+public Action Timer_Step(Handle timer, any data)
+{
+	int c = view_as<int>(data) / STEP_SLOTS;
+	int step = view_as<int>(data) % STEP_SLOTS;
+	if (g_caseActive && c == g_curCase)
+		RunStep(c, step);
+	return Plugin_Stop;
+}
+
+void SkipCase(const char[] why)
+{
+	LogToFileEx(g_logPath, "[SKIP] %s - %s", g_caseNames[g_curCase], why);
+	PrintToServer("[SKIP] %s - %s", g_caseNames[g_curCase], why);
+	g_skip++;
+	g_attempt = 1;
+	g_caseActive = false;
+	CleanupFakes();
+	CreateTimer(0.5, Timer_NextCase, g_curCase + 1, TIMER_FLAG_NO_MAPCHANGE);
+}
+
+void EndCase(bool ok, const char[] msg)
+{
+	if (!g_caseActive)
+		return;
+	if (g_interfered && g_attempt < MAX_ATTEMPTS)
+	{
+		PrintToServer("[dr_test] real round_start during \"%s\" (attempt %d); retrying", g_caseNames[g_curCase], g_attempt);
+		g_attempt++;
+		g_caseActive = false;
+		CleanupFakes();
+		CreateTimer(1.5, Timer_NextCase, g_curCase, TIMER_FLAG_NO_MAPCHANGE);
+		return;
+	}
+	if (g_interfered)
+		LogToFileEx(g_logPath, "[WARN] game fired its own round_start during every attempt of \"%s\"", g_caseNames[g_curCase]);
+	g_attempt = 1;
+
+	char line[512];
+	if (ok && ErrorLogSize() > g_errSizeAtStart)
+	{
+		ok = false;
+		Format(line, sizeof(line), "[FAIL] %s - SourceMod logged errors during this case (see logs/errors_*.log)", g_caseNames[g_curCase]);
+	}
+	else
+		Format(line, sizeof(line), "[%s] %s - %s", ok ? "PASS" : "FAIL", g_caseNames[g_curCase], msg);
+	LogToFileEx(g_logPath, "%s", line);
+	PrintToServer("%s", line);
+	if (ok)
+		g_pass++;
+	else
+	{
+		g_fail++;
+		LogCapture();
+	}
+	g_caseActive = false;
+	CleanupFakes();
+	CreateTimer(0.5, Timer_NextCase, g_curCase + 1, TIMER_FLAG_NO_MAPCHANGE);
+}
+
+// Context for a failed case: what the real client was sent.
+void LogCapture()
+{
+	char flat[CAPTURE_LEN];
+	int h = FindHuman();
+	if (h != 0)
+		LogToFileEx(g_logPath, "[INFO]   client menu source: %d (0 none, 1 external, 2 menu, 3 panel)", GetClientMenu(h));
+	strcopy(flat, sizeof(flat), g_chatText);
+	ReplaceString(flat, sizeof(flat), "\n", " | ");
+	LogToFileEx(g_logPath, "[INFO]   chat text: %s", flat);
+}
+
+public Action Timer_NextCase(Handle timer, any next)
+{
+	int n = view_as<int>(next);
+	if (n < NUM_CASES)
+	{
+		StartCase(n);
+		return Plugin_Stop;
+	}
+	g_running = false;
+	RestoreCvars();
+	if (GetPluginStatus(FindPluginByFile(PLUGIN_FILE)) != Plugin_Running)
+	{
+		g_fail++;
+		LogToFileEx(g_logPath, "[FAIL] %s is no longer running at the end of the suite", PLUGIN_FILE);
+	}
+	LogToFileEx(g_logPath, "tests finished: %d passed, %d failed, %d skipped", g_pass, g_fail, g_skip);
+	PrintToServer("[dr_test] tests finished: %d passed, %d failed, %d skipped", g_pass, g_fail, g_skip);
+	if (g_cvAutorun.BoolValue)
+	{
+		ServerCommand("sm plugins list");
+		ServerCommand("sm exts list");
+		CreateTimer(1.0, Timer_Quit);
+	}
+	return Plugin_Stop;
+}
+
+public Action Timer_Quit(Handle timer)
+{
+	ServerCommand("quit");
+	return Plugin_Stop;
+}
+
+//===== Cases =====
+
+void RunStep(int c, int step)
+{
+	switch (c)
+	{
+		case C_LOADED: Case_Loaded();
+		case C_SETTINGS_FILE: Case_SettingsFile();
+		case C_FAKE_FIGHT: Case_FakeFight(step);
+		case C_DEATH_PANEL: Case_DeathPanel(step);
+		case C_LAST_REPORT: Case_LastReport(step);
+		case C_HELP: Case_Help(step);
+		case C_CHAT_MODE: Case_ChatMode(step);
+		case C_OFF: Case_Off(step);
+		case C_ROUND_END_ALIVE: Case_RoundEndAlive(step);
+	}
+}
+
+void Case_Loaded()
+{
+	Handle plugin = FindPluginByFile(PLUGIN_FILE);
+	if (plugin == null || GetPluginStatus(plugin) != Plugin_Running)
+	{
+		EndCase(false, PLUGIN_FILE ... " is not running");
+		return;
+	}
+	static const char cvars[][] = { "sm_damagereport_version", "sm_damagereport_prefix" };
+	for (int i = 0; i < sizeof(cvars); i++)
+	{
+		if (FindConVar(cvars[i]) == null)
+		{
+			char why[128];
+			Format(why, sizeof(why), "cvar %s missing", cvars[i]);
+			EndCase(false, why);
+			return;
+		}
+	}
+	static const char cmds[][] = { "damage_report", "drs", "last_damage_report", "ldr", "dmg", "dr" };
+	for (int i = 0; i < sizeof(cmds); i++)
+	{
+		if (!CommandExists(cmds[i]))
+		{
+			char why[128];
+			Format(why, sizeof(why), "command %s missing", cmds[i]);
+			EndCase(false, why);
+			return;
+		}
+	}
+	EndCase(true, "plugin, 2 cvars and 6 commands present");
+}
+
+void Case_SettingsFile()
+{
+	char path[PLATFORM_MAX_PATH];
+	BuildPath(Path_SM, path, sizeof(path), SETTINGS_FILE);
+	if (FileExists(path))
+		EndCase(true, SETTINGS_FILE ... " exists");
+	else
+		EndCase(false, SETTINGS_FILE ... " was not created");
+}
+
+void Case_FakeFight(int step)
+{
+	switch (step)
+	{
+		case 0:
+		{
+			if (!SpawnFakes())
+			{
+				EndCase(false, "could not create fake clients");
+				return;
+			}
+			Schedule(1.0, C_FAKE_FIGHT, 1);
+		}
+		case 1:
+		{
+			int attacker = GetClientOfUserId(g_uidAttacker);
+			int victim = GetClientOfUserId(g_uidVictim);
+			if (attacker == 0 || victim == 0)
+			{
+				EndCase(false, "fake client is gone");
+				return;
+			}
+			SDKHooks_TakeDamage(victim, attacker, attacker, HIT_DAMAGE, DMG_BULLET);
+			SDKHooks_TakeDamage(attacker, 0, 0, HIT_DAMAGE, DMG_FALL); // world damage, attacker 0
+			SDKHooks_TakeDamage(victim, attacker, attacker, KILL_DAMAGE, DMG_BULLET);
+			Schedule(1.5, C_FAKE_FIGHT, 2);
+		}
+		case 2:
+		{
+			if (IsPlayerAlive(GetClientOfUserId(g_uidVictim)))
+			{
+				EndCase(false, "the victim did not die");
+				return;
+			}
+			FireRoundEnd();
+			Schedule(1.5, C_FAKE_FIGHT, 3);
+		}
+		case 3:
+		{
+			if (FindHuman() != 0 && !ChatHas("inflicted most damage"))
+			{
+				EndCase(false, "the real client got no most-damage chat line");
+				return;
+			}
+			EndCase(true, "events handled without errors");
+		}
+	}
+}
+
+void Case_DeathPanel(int step)
+{
+	switch (step)
+	{
+		case 0: SetupHumanFight(C_DEATH_PANEL);
+		case 1: HumanKilledByFake(C_DEATH_PANEL);
+		case 2:
+		{
+			char why[256];
+			if (CheckPanelAfterDeath(why, sizeof(why)))
+				EndCase(true, "report panel open after death, none before");
+			else
+				EndCase(false, why);
+		}
+	}
+}
+
+void Case_LastReport(int step)
+{
+	switch (step)
+	{
+		case 0: SetupHumanFight(C_LAST_REPORT);
+		case 1: HumanKilledByFake(C_LAST_REPORT);
+		case 2:
+		{
+			int h = FindHuman();
+			CancelClientMenu(h);
+			if (GetClientMenu(h) != MenuSource_None)
+			{
+				EndCase(false, "the death panel could not be closed before dr");
+				return;
+			}
+			FakeClientCommand(h, "dr");
+			Schedule(REPORT_WAIT, C_LAST_REPORT, 3);
+		}
+		case 3:
+		{
+			if (GetClientMenu(FindHuman()) == MenuSource_RawPanel)
+				EndCase(true, "dr opened the report panel again");
+			else
+				EndCase(false, "no panel open after dr");
+		}
+	}
+}
+
+void Case_Help(int step)
+{
+	switch (step)
+	{
+		case 0:
+		{
+			FakeClientCommand(FindHuman(), "drs help");
+			Schedule(1.0, C_HELP, 1);
+		}
+		case 1:
+		{
+			if (ChatHas("/drs status") && ChatHas("/dr or /ldr or /dmg"))
+				EndCase(true, "help lines sent");
+			else
+				EndCase(false, "help lines not in chat");
+		}
+	}
+}
+
+void Case_ChatMode(int step)
+{
+	switch (step)
+	{
+		case 0:
+		{
+			FakeClientCommand(FindHuman(), "drs chat");
+			SetupHumanFight(C_CHAT_MODE);
+		}
+		case 1:
+		{
+			if (!ChatHas("printed in chat"))
+			{
+				RestoreHumanSettings();
+				EndCase(false, "no confirmation for drs chat");
+				return;
+			}
+			HumanKilledByFake(C_CHAT_MODE);
+		}
+		case 2:
+		{
+			bool panel = GetClientMenu(FindHuman()) == MenuSource_RawPanel;
+			RestoreHumanSettings();
+			// Chat mode prints the same report text the panel shows, so the content is checked here.
+			if (!ChatHas("--Attackers (Total dmg:540)--"))
+				EndCase(false, "no Attackers header with 540 dmg in chat");
+			else if (!ChatHas("X " ... FAKE_ATTACKER ... " [540 dmg, 3 hits] (Killer)"))
+				EndCase(false, "attacker line lacks X, 540 dmg, 3 hits or (Killer)");
+			else if (ChatHas("--Victims"))
+				EndCase(false, "Victims section though the human hit no one");
+			else if (panel)
+				EndCase(false, "a panel was shown in chat mode");
+			else
+				EndCase(true, "report in chat with X, 540 dmg, 3 hits, (Killer); no panel");
+		}
+	}
+}
+
+void Case_Off(int step)
+{
+	switch (step)
+	{
+		case 0:
+		{
+			FakeClientCommand(FindHuman(), "drs off");
+			SetupHumanFight(C_OFF);
+		}
+		case 1:
+		{
+			if (!ChatHas("switched off"))
+			{
+				RestoreHumanSettings();
+				EndCase(false, "no confirmation for drs off");
+				return;
+			}
+			HumanKilledByFake(C_OFF);
+		}
+		case 2:
+		{
+			bool shown = GetClientMenu(FindHuman()) == MenuSource_RawPanel || ChatHas("Attackers (Total dmg:");
+			RestoreHumanSettings();
+			if (shown)
+				EndCase(false, "a report was shown while off");
+			else
+				EndCase(true, "no report while off");
+		}
+	}
+}
+
+void Case_RoundEndAlive(int step)
+{
+	switch (step)
+	{
+		case 0: SetupHumanFight(C_ROUND_END_ALIVE);
+		case 1:
+		{
+			int h = FindHuman();
+			int fake = GetClientOfUserId(g_uidAttacker);
+			if (fake == 0)
+			{
+				EndCase(false, "fake client is gone");
+				return;
+			}
+			SDKHooks_TakeDamage(fake, h, h, HIT_DAMAGE, DMG_BULLET);
+			SDKHooks_TakeDamage(fake, h, h, HIT_DAMAGE, DMG_BULLET);
+			FireRoundEnd();
+			Schedule(REPORT_WAIT, C_ROUND_END_ALIVE, 2);
+		}
+		case 2:
+		{
+			if (GetClientMenu(FindHuman()) != MenuSource_RawPanel)
+				EndCase(false, "no report panel open for the alive player");
+			else if (!ChatHas("inflicted most damage, 40 dmg in 2 hits"))
+				EndCase(false, "no most-damage chat line for 40 dmg in 2 hits");
+			else
+				EndCase(true, "report panel and most-damage chat");
+		}
+	}
+}
+
+//===== Case helpers =====
+
+// Step 0 of a real-client case: the human on T, one fake attacker on CT; then step 1.
+void SetupHumanFight(int c)
+{
+	int h = FindHuman();
+	ChangeClientTeam(h, CS_TEAM_T);
+	CS_RespawnPlayer(h);
+	int fake = SpawnFake(FAKE_ATTACKER, CS_TEAM_CT);
+	if (fake == 0)
+	{
+		EndCase(false, "could not create the fake attacker");
+		return;
+	}
+	g_uidAttacker = GetClientUserId(fake);
+	// Spawning sends the human a short "DR Fix" panel; let it expire before the case's report.
+	Schedule(2.0, c, 1);
+}
+
+// Two hits then a kill on the human; then step 2 once the report had time to show.
+void HumanKilledByFake(int c)
+{
+	int h = FindHuman();
+	int fake = GetClientOfUserId(g_uidAttacker);
+	if (fake == 0 || !IsPlayerAlive(h))
+	{
+		EndCase(false, "fake gone or human not alive before the kill");
+		return;
+	}
+	g_menuBeforeKill = GetClientMenu(h) != MenuSource_None;
+	SDKHooks_TakeDamage(h, fake, fake, HIT_DAMAGE, DMG_BULLET);
+	SDKHooks_TakeDamage(h, fake, fake, HIT_DAMAGE, DMG_BULLET);
+	SDKHooks_TakeDamage(h, fake, fake, KILL_DAMAGE, DMG_BULLET);
+	Schedule(REPORT_WAIT, c, 2);
+}
+
+// SourceMod sends panels with hooks blocked, so a plugin cannot read their text; it can see that one is open.
+bool CheckPanelAfterDeath(char[] why, int maxlen)
+{
+	int h = FindHuman();
+	if (IsPlayerAlive(h))
+		strcopy(why, maxlen, "the human did not die");
+	else if (g_menuBeforeKill)
+		strcopy(why, maxlen, "a menu was already open before the kill");
+	else if (GetClientMenu(h) != MenuSource_RawPanel)
+		strcopy(why, maxlen, "no panel open after death");
+	else
+		return true;
+	return false;
+}
+
+// Back to the defaults (on, popup, long), which also removes the client's entry from the settings file.
+void RestoreHumanSettings()
+{
+	int h = FindHuman();
+	if (h == 0)
+		return;
+	FakeClientCommand(h, "drs on");
+	FakeClientCommand(h, "drs popup");
+	FakeClientCommand(h, "drs long");
+}
+
+bool SpawnFakes()
+{
+	int attacker = SpawnFake(FAKE_ATTACKER, CS_TEAM_T);
+	int victim = SpawnFake(FAKE_VICTIM, CS_TEAM_CT);
+	if (attacker == 0 || victim == 0)
+		return false;
+	g_uidAttacker = GetClientUserId(attacker);
+	g_uidVictim = GetClientUserId(victim);
+	return true;
+}
+
+int SpawnFake(const char[] name, int team)
+{
+	int c = CreateFakeClient(name);
+	if (c <= 0)
+		return 0;
+	ChangeClientTeam(c, team);
+	CS_RespawnPlayer(c);
+	return c;
+}
+
+void CleanupFakes()
+{
+	int uids[2];
+	uids[0] = g_uidAttacker;
+	uids[1] = g_uidVictim;
+	for (int i = 0; i < sizeof(uids); i++)
+	{
+		int c = GetClientOfUserId(uids[i]);
+		if (c > 0 && IsClientConnected(c) && IsFakeClient(c))
+			KickClient(c, "damage report test cleanup");
+	}
+	g_uidAttacker = 0;
+	g_uidVictim = 0;
+	int h = FindHuman();
+	if (h != 0 && GetClientTeam(h) != CS_TEAM_SPECTATOR)
+		ChangeClientTeam(h, CS_TEAM_SPECTATOR);
+}
+
+int FindHuman()
+{
+	for (int i = 1; i <= MaxClients; i++)
+		if (IsClientInGame(i) && !IsFakeClient(i) && !IsClientSourceTV(i))
+			return i;
+	return 0;
+}
+
+void FireRoundEnd()
+{
+	Event ev = CreateEvent("round_end");
+	if (ev == null)
+		return;
+	ev.SetInt("winner", CS_TEAM_CT);
+	ev.SetInt("reason", 7); // CT win; 16 (game commencing) is ignored by the plugin
+	ev.SetString("message", "#CTs_Win");
+	g_selfFire = true;
+	ev.Fire();
+	g_selfFire = false;
+}
+
+void FireNamedEvent(const char[] name)
+{
+	Event ev = CreateEvent(name);
+	if (ev == null)
+		return;
+	g_selfFire = true;
+	ev.Fire();
+	g_selfFire = false;
+}
+
+int ErrorLogSize()
+{
+	char date[16], path[PLATFORM_MAX_PATH];
+	FormatTime(date, sizeof(date), "%Y%m%d");
+	BuildPath(Path_SM, path, sizeof(path), "logs/errors_%s.log", date);
+	return FileExists(path) ? FileSize(path) : 0;
+}
+
+// Sets a game cvar for the run and returns its old value (-1 if the cvar does not exist).
+int SwapCvarInt(const char[] name, int value)
+{
+	ConVar cv = FindConVar(name);
+	if (cv == null)
+		return -1;
+	int old = cv.IntValue;
+	cv.IntValue = value;
+	return old;
+}
+
+void RestoreCvars()
+{
+	if (g_origIgnoreWin != -1)
+		SwapCvarInt("mp_ignore_round_win_conditions", g_origIgnoreWin);
+	if (g_origAutokick != -1)
+		SwapCvarInt("mp_autokick", g_origAutokick);
+	g_origIgnoreWin = -1;
+	g_origAutokick = -1;
+}
