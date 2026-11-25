@@ -29,6 +29,7 @@
 #define DR_TITLE_MAX        64
 #define DR_MENU_RETRY_MAX 8  // 8 * 1s = 8s max wait
 #define DR_CHAT_MAX 256
+#define DR_SAVE_DELAY 5.0 // at most one settings file write per 5 s, however fast clients send drs
 
 // CS:S chat color codes; \x07 takes a 6-digit hex color
 #define DR_COLOR_PREFIX "\x04"
@@ -84,6 +85,8 @@ int g_KilledPlayer[MAXPLAYERS + 1][MAXPLAYERS + 1];
 int g_PlayerDROption[MAXPLAYERS + 1][NROFOPTIONS];
 char g_filenameSettings[MAX_FILE_LEN];
 Handle KVSettings = INVALID_HANDLE;
+bool g_SettingsDirty;
+Handle g_SaveTimer;
 
 int g_defaultPropOnOff = DrON;
 int g_defaultPropChatPop = DrPop;
@@ -307,7 +310,7 @@ public void OnPluginStart(){
               continue;
           }
 
-          GetClientName(i, g_PlayerName[i], sizeof(g_PlayerName[]));
+          StorePlayerName(i);
 
           if (!IsFakeClient(i))
           {
@@ -330,8 +333,8 @@ public void OnPluginStart(){
 
 public Action Command_LastDamageReport(int client, int args)
 {
-    // Dont do anything if command comes from server
-    if (client == 0)
+    // Dont do anything if command comes from server or from a client that is still loading
+    if (client == 0 || !IsClientInGame(client))
     {
         return Plugin_Handled;
     }
@@ -372,8 +375,8 @@ public Action Command_LastDamageReport(int client, int args)
 
 public Action Command_DamageReport(int client, int args)
 {
-    // Dont do anything if command comes from server
-    if (client == 0)
+    // Dont do anything if command comes from server or from a client that is still loading
+    if (client == 0 || !IsClientInGame(client))
     {
         return Plugin_Handled;
     }
@@ -393,6 +396,9 @@ public Action Command_DamageReport(int client, int args)
 
     char option[20];
     GetCmdArg(1, option, sizeof(option));
+
+    int before[NROFOPTIONS];
+    before = g_PlayerDROption[client];
 
     if (StrEqual(option, "on", false))
     {
@@ -450,7 +456,14 @@ public Action Command_DamageReport(int client, int args)
         PrintHelp(client);
     }
 
-    StoreSettingsForClient(client);
+    for (int prop = 0; prop < NROFOPTIONS; prop++)
+    {
+        if (g_PlayerDROption[client][prop] != before[prop])
+        {
+            StoreSettingsForClient(client);
+            break;
+        }
+    }
     return Plugin_Handled;
 }
 
@@ -469,11 +482,44 @@ void PrintHelp(int client)
 // Save all settings on map end
 public void OnMapEnd()
 {
-    // Save user settings to a file
-    KvRewind(KVSettings);
-    KeyValuesToFile(KVSettings, g_filenameSettings);
+    // The save timer does not survive the map change
+    g_SaveTimer = null;
+    SaveSettings();
 
     clearAllDamageData();
+}
+
+public void OnPluginEnd()
+{
+    SaveSettings();
+}
+
+void MarkSettingsDirty()
+{
+    g_SettingsDirty = true;
+    if (g_SaveTimer == null)
+    {
+        g_SaveTimer = CreateTimer(DR_SAVE_DELAY, Timer_SaveSettings, _, TIMER_FLAG_NO_MAPCHANGE);
+    }
+}
+
+public Action Timer_SaveSettings(Handle timer)
+{
+    g_SaveTimer = null;
+    SaveSettings();
+    return Plugin_Stop;
+}
+
+void SaveSettings()
+{
+    if (!g_SettingsDirty)
+    {
+        return;
+    }
+
+    KvRewind(KVSettings);
+    KeyValuesToFile(KVSettings, g_filenameSettings);
+    g_SettingsDirty = false;
 }
 
 
@@ -789,7 +835,8 @@ public void DisplayDamageReport(
             TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE
         );
 
-        pack.WriteCell(in_victim);
+        // A userid, so a player who takes the slot later never gets this report
+        pack.WriteCell(GetClientUserId(in_victim));
 
         if ((strlen(damageTakenLong) + strlen(damageDoneLong) < 512 - 30)
             && (g_PlayerDROption[in_victim][propShortLong] == DrLong))
@@ -835,11 +882,17 @@ public Action DisplayDamageReportMenu(Handle timer, DataPack pack)
     char attackerItem[100];
 
     pack.Reset();
-    int p_victim        = pack.ReadCell();
+    int p_victim        = GetClientOfUserId(pack.ReadCell());
     pack.ReadString(p_damageDone, sizeof(p_damageDone));
     pack.ReadString(p_damageTaken, sizeof(p_damageTaken));
     int p_totalDmgDone  = pack.ReadCell();
     int p_totalDmgTaken = pack.ReadCell();
+
+    // The victim left; connect and disconnect already cleared the slot's pending flag
+    if (p_victim == 0)
+    {
+        return Plugin_Stop;
+    }
 
     if (!IsClientInGame(p_victim))
     {
@@ -924,9 +977,25 @@ public void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast
     }
 
     // Store player name in case they disconnect before round end
-    char clientName[32];
-    GetClientName(client, clientName, sizeof(clientName));
-    strcopy(g_PlayerName[client], sizeof(g_PlayerName[]), clientName);
+    StorePlayerName(client);
+}
+
+
+// Control bytes are chat color codes and would recolor or break the lines the name is printed in
+void StorePlayerName(int client)
+{
+    char name[sizeof(g_PlayerName[])];
+    GetClientName(client, name, sizeof(name));
+
+    int kept = 0;
+    for (int i = 0; name[i] != '\0'; i++)
+    {
+        if ((name[i] & 0xFF) >= ' ')
+        {
+            g_PlayerName[client][kept++] = name[i];
+        }
+    }
+    g_PlayerName[client][kept] = '\0';
 }
 
 
@@ -1020,7 +1089,7 @@ public void StoreSettingsForClient(int client)
         }
 
         KvRewind(KVSettings);
-        KeyValuesToFile(KVSettings, g_filenameSettings);
+        MarkSettingsDirty();
     }
 }
 
@@ -1142,7 +1211,14 @@ void FormatPlayerName(char[] out, int outSize, const char[] name)
     }
 
     strcopy(out, outSize, name);
-    out[DR_NAME_TRUNCATE_AT] = '\0';
+
+    // Cut before a UTF-8 continuation byte (10xxxxxx) would split a character
+    int cut = DR_NAME_TRUNCATE_AT;
+    while (cut > 0 && (out[cut] & 0xC0) == 0x80)
+    {
+        cut--;
+    }
+    out[cut] = '\0';
     StrCat(out, outSize, "...");
 }
 
