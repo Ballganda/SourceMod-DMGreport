@@ -1,5 +1,6 @@
 #include <sourcemod>
 #include <sdktools>
+#include <instance_config> // settings file in this server's own SourceMod folder (not the shared game cfg folder)
 
 #pragma semicolon 1
 #pragma newdecls required
@@ -92,6 +93,11 @@ public void OnPrefixChanged(ConVar convar, const char[] oldValue, const char[] n
     strcopy(g_Prefix, sizeof(g_Prefix), newValue);
 }
 
+public void OnConfigsExecuted()
+{
+    InstCfg_Apply();
+}
+
 // Hook events on plugin start
 public void OnPluginStart(){
   g_maxClients = MaxClients;
@@ -103,7 +109,11 @@ public void OnPluginStart(){
   g_cvPrefix = CreateConVar("sm_damagereport_prefix", "[theREG...]", "Text shown before damage report chat messages");
   g_cvPrefix.GetString(g_Prefix, sizeof(g_Prefix));
   g_cvPrefix.AddChangeHook(OnPrefixChanged);
-  
+
+  // configs/sm_damagereport.cfg (named after the plugin file); the version cvar stays out of it
+  InstCfg_Add(g_cvPrefix);
+  InstCfg_Ensure();
+
   HookEvent("player_death", Event_PlayerDeath);
   HookEvent("player_hurt", Event_PlayerHurt);
   HookEvent("player_spawn", Event_PlayerSpawn);

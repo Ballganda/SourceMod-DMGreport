@@ -1,6 +1,7 @@
 ## Build and test
 
 - `build.ps1` compiles `scripting\*.sp` and `tests\*.sp` into `plugins\` with the local server's `spcomp` (SourceMod 1.12).
+- `instance_config.inc` comes from the `incs` submodule (`Ballganda/SourceMod-Incs`). Do not edit it here: change it in that repo, then move the submodule pointer.
 - `test.ps1` runs `tests\damagereport_tests.sp` on a srcds test slot; `-WithClient` adds the real-client cases, `-InjectError` must fail. Operating srcds and the client: the `srcds-testing` skill.
 - SourceMod sends panels with user-message hooks blocked, so the suite cannot read panel text. Panel cases check `GetClientMenu() == MenuSource_RawPanel`; report content is checked in chat mode, which prints the same text.
 

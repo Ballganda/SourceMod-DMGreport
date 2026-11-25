@@ -1,4 +1,4 @@
-﻿// Regression suite for sm_damagereport.smx (Panel version).
+// Regression suite for sm_damagereport.smx (Panel version).
 // Run by hand with "dr_test" on the server console, or unattended with +dr_test_autorun 1 (test.ps1).
 // Results go to logs/damagereport_tests.log. Cases marked "real client" need a human player and SKIP without one.
 #include <sourcemod>
@@ -11,6 +11,13 @@
 
 #define PLUGIN_FILE "sm_damagereport.smx"
 #define SETTINGS_FILE "configs/damagereportusersettings.cfg"
+#define CONFIG_FILE "configs/sm_damagereport.cfg"
+#define PREFIX_CVAR "sm_damagereport_prefix"
+#define DEFAULT_PREFIX "[theREG...]"
+#define TEST_PREFIX "[cfg test]"
+#define CONFIG_LEN 4096
+// A reloaded plugin runs OnPluginStart and, loaded late, OnConfigsExecuted at once.
+#define RELOAD_WAIT 1.5
 #define NAME_LEN 96
 #define CAPTURE_LEN 4096
 #define MAX_ATTEMPTS 3 // a case is rerun if the game restarted the round under it
@@ -26,6 +33,9 @@ enum
 {
 	C_LOADED,
 	C_SETTINGS_FILE,
+	C_CONFIG_CREATED,
+	C_CONFIG_APPLIED,
+	C_CONFIG_APPENDED,
 	C_FAKE_FIGHT,
 	C_DEATH_PANEL,
 	C_LAST_REPORT,
@@ -61,6 +71,11 @@ int g_uidVictim;
 char g_chatText[CAPTURE_LEN];
 bool g_menuBeforeKill;
 
+// The plugin's config file as it was before a config case changed it.
+char g_configBackup[CONFIG_LEN];
+bool g_configBackedUp;
+bool g_configExisted;
+
 ConVar g_cvAutorun;
 ConVar g_cvInjectError;
 ConVar g_cvWaitClient;
@@ -80,6 +95,9 @@ public void OnPluginStart()
 
 	SetCase(C_LOADED, "plugin running, cvars and commands exist", false);
 	SetCase(C_SETTINGS_FILE, "settings file created in SourceMod configs", false);
+	SetCase(C_CONFIG_CREATED, "config file created with the prefix cvar at its default", false);
+	SetCase(C_CONFIG_APPLIED, "config file value applied, foreign cvar skipped", false);
+	SetCase(C_CONFIG_APPENDED, "missing config entry appended, own lines kept", false);
 	SetCase(C_FAKE_FIGHT, "fake vs fake damage, death, world damage, round end raise no error", false);
 	SetCase(C_DEATH_PANEL, "real client: killed player gets the report panel", true);
 	SetCase(C_LAST_REPORT, "real client: dr shows the last report again", true);
@@ -184,6 +202,7 @@ public void OnPluginEnd()
 	CleanupFakes();
 	g_running = false;
 	RestoreCvars();
+	RestoreConfig();
 }
 
 public Action Cmd_RunTests(int args)
@@ -335,6 +354,67 @@ public Action Timer_Quit(Handle timer)
 	return Plugin_Stop;
 }
 
+//===== Config file =====
+
+void ConfigPath(char[] path, int maxlen)
+{
+	BuildPath(Path_SM, path, maxlen, CONFIG_FILE);
+}
+
+bool ReadConfig(char[] text, int maxlen)
+{
+	text[0] = '\0';
+	char path[PLATFORM_MAX_PATH], line[512];
+	ConfigPath(path, sizeof(path));
+	File f = OpenFile(path, "rb");
+	if (f == null)
+		return false;
+	while (f.ReadLine(line, sizeof(line)))
+		StrCat(text, maxlen, line);
+	delete f;
+	return true;
+}
+
+void WriteConfig(const char[] text)
+{
+	char path[PLATFORM_MAX_PATH];
+	ConfigPath(path, sizeof(path));
+	File f = OpenFile(path, "wb");
+	if (f == null)
+	{
+		LogToFileEx(g_logPath, "[INFO]   cannot write %s", path);
+		return;
+	}
+	f.WriteString(text, false);
+	delete f;
+}
+
+// Keeps the current file so RestoreConfig can put it back, then writes text in its place.
+void ReplaceConfig(const char[] text)
+{
+	if (!g_configBackedUp)
+	{
+		g_configExisted = ReadConfig(g_configBackup, sizeof(g_configBackup));
+		g_configBackedUp = true;
+	}
+	WriteConfig(text);
+}
+
+void RestoreConfig()
+{
+	if (!g_configBackedUp)
+		return;
+	g_configBackedUp = false;
+	if (g_configExisted)
+		WriteConfig(g_configBackup);
+	else
+	{
+		char path[PLATFORM_MAX_PATH];
+		ConfigPath(path, sizeof(path));
+		DeleteFile(path);
+	}
+}
+
 //===== Cases =====
 
 void RunStep(int c, int step)
@@ -343,6 +423,9 @@ void RunStep(int c, int step)
 	{
 		case C_LOADED: Case_Loaded();
 		case C_SETTINGS_FILE: Case_SettingsFile();
+		case C_CONFIG_CREATED: Case_ConfigCreated();
+		case C_CONFIG_APPLIED: Case_ConfigApplied(step);
+		case C_CONFIG_APPENDED: Case_ConfigAppended(step);
 		case C_FAKE_FIGHT: Case_FakeFight(step);
 		case C_DEATH_PANEL: Case_DeathPanel(step);
 		case C_LAST_REPORT: Case_LastReport(step);
@@ -394,6 +477,86 @@ void Case_SettingsFile()
 		EndCase(true, SETTINGS_FILE ... " exists");
 	else
 		EndCase(false, SETTINGS_FILE ... " was not created");
+}
+
+void Case_ConfigCreated()
+{
+	char text[CONFIG_LEN];
+	if (!ReadConfig(text, sizeof(text)))
+		EndCase(false, CONFIG_FILE ... " was not created");
+	else if (StrContains(text, PREFIX_CVAR ... " \"" ... DEFAULT_PREFIX ... "\"") == -1)
+		EndCase(false, CONFIG_FILE ... " has no " ... PREFIX_CVAR ... " entry at its default");
+	else if (StrContains(text, "sm_damagereport_version") != -1)
+		EndCase(false, CONFIG_FILE ... " holds the version cvar");
+	else
+		EndCase(true, CONFIG_FILE ... " holds " ... PREFIX_CVAR ... " \"" ... DEFAULT_PREFIX ... "\"");
+}
+
+void Case_ConfigApplied(int step)
+{
+	static int freezeBefore;
+	switch (step)
+	{
+		case 0:
+		{
+			freezeBefore = FindConVar("mp_freezetime").IntValue;
+			char text[256];
+			Format(text, sizeof(text), "%s \"%s\" // quoted value with a comment\nmp_freezetime %d\n", PREFIX_CVAR, TEST_PREFIX, freezeBefore + 3);
+			ReplaceConfig(text);
+			ServerCommand("sm plugins reload sm_damagereport");
+			Schedule(RELOAD_WAIT, C_CONFIG_APPLIED, 1);
+		}
+		case 1:
+		{
+			char prefix[64];
+			ConVar cvPrefix = FindConVar(PREFIX_CVAR);
+			cvPrefix.GetString(prefix, sizeof(prefix));
+			int freeze = FindConVar("mp_freezetime").IntValue;
+			RestoreConfig();
+			cvPrefix.SetString(DEFAULT_PREFIX);
+
+			char why[256];
+			if (!StrEqual(prefix, TEST_PREFIX))
+			{
+				Format(why, sizeof(why), PREFIX_CVAR ... " is \"%s\", file set \"%s\"", prefix, TEST_PREFIX);
+				EndCase(false, why);
+			}
+			else if (freeze != freezeBefore)
+			{
+				FindConVar("mp_freezetime").IntValue = freezeBefore;
+				EndCase(false, "mp_freezetime from the file was applied");
+			}
+			else
+				EndCase(true, PREFIX_CVAR ... " set from the file, mp_freezetime left alone");
+		}
+	}
+}
+
+void Case_ConfigAppended(int step)
+{
+	switch (step)
+	{
+		case 0:
+		{
+			ReplaceConfig("// own line\n");
+			ServerCommand("sm plugins reload sm_damagereport");
+			Schedule(RELOAD_WAIT, C_CONFIG_APPENDED, 1);
+		}
+		case 1:
+		{
+			char text[CONFIG_LEN];
+			bool read = ReadConfig(text, sizeof(text));
+			RestoreConfig();
+			if (!read)
+				EndCase(false, CONFIG_FILE ... " cannot be read");
+			else if (StrContains(text, "// own line") != 0)
+				EndCase(false, "the existing line was changed or moved");
+			else if (StrContains(text, PREFIX_CVAR ... " \"" ... DEFAULT_PREFIX ... "\"") == -1)
+				EndCase(false, PREFIX_CVAR ... " entry was not appended");
+			else
+				EndCase(true, PREFIX_CVAR ... " appended after the existing line");
+		}
+	}
 }
 
 void Case_FakeFight(int step)

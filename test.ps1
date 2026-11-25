@@ -17,7 +17,8 @@ param(
 $OWNER = 'SourceMod-DMGreport/test'
 $SLOT_TOOL = 'C:\Users\user\srcds-slot.ps1'
 $PLUGINS = 'sm_damagereport.smx', 'damagereport_tests.smx'
-$SETTINGS_FILE = 'configs\damagereportusersettings.cfg'
+# files the plugin creates on first load; teardown removes those the run created
+$GENERATED_FILES = 'configs\damagereportusersettings.cfg', 'configs\sm_damagereport.cfg'
 $clientNames = 'cstrike_win64', 'cstrike', 'hl2'
 $clientLog = Join-Path $ClientDir 'cstrike\console.log'
 $steamExe = Join-Path (Split-Path (Split-Path (Split-Path $ClientDir))) 'steam.exe'
@@ -82,13 +83,12 @@ $smDir = Join-Path $game 'addons\sourcemod'
 $smLogs = Join-Path $smDir 'logs'
 $consoleLog = Join-Path $game 'console.log'
 $testLog = Join-Path $smLogs 'damagereport_tests.log'
-$settingsPath = Join-Path $smDir $SETTINGS_FILE
+$generated = $GENERATED_FILES | ForEach-Object { Join-Path $smDir $_ } | Where-Object { -not (Test-Path $_) }
 
 $problems = New-Object System.Collections.Generic.List[string]
 $warnings = New-Object System.Collections.Generic.List[string]
 $deployed = @()
 $backups = @{}
-$settingsExisted = Test-Path $settingsPath
 $proc = $null
 $clientStarted = $false
 $before = @{}
@@ -184,7 +184,7 @@ finally {
     foreach ($t in $deployed) {
         if ($backups.ContainsKey($t)) { [IO.File]::WriteAllBytes($t, $backups[$t]) } else { Remove-Item $t -Force -ErrorAction SilentlyContinue }
     }
-    if (-not $settingsExisted) { Remove-Item $settingsPath -Force -ErrorAction SilentlyContinue }
+    foreach ($g in $generated) { Remove-Item $g -Force -ErrorAction SilentlyContinue }
     if ($slot) {
         $checkin = & $SLOT_TOOL checkin -Slot $slot -Owner $OWNER
         Write-Host "$checkin"
