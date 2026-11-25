@@ -187,11 +187,6 @@ finally {
     if (-not $settingsExisted) { Remove-Item $settingsPath -Force -ErrorAction SilentlyContinue }
     if ($slot) {
         $checkin = & $SLOT_TOOL checkin -Slot $slot -Owner $OWNER
-        # srcds rewrites steam_appid.txt (same content, new time) on every start; srcds-slot.ps1 does not yet treat it as a runtime file
-        if ($LASTEXITCODE -eq 1 -and "$checkin" -match 'added= missing= changed=steam_appid\.txt \(') {
-            $warnings.Add("slot: srcds rewrote steam_appid.txt; restored")
-            $checkin = & $SLOT_TOOL checkin -Slot $slot -Owner $OWNER -Restore
-        }
         Write-Host "$checkin"
         if ($LASTEXITCODE -ne 0) { $problems.Add("slot not clean after teardown: $checkin") }
     }
