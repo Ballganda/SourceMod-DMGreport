@@ -127,6 +127,19 @@ Notes:
 - The panel cases check that the report panel is open. A plugin cannot read the text of a SourceMod panel. The chat-mode case checks the report text, which is the same text the panel shows.
 - The config cases write their own `configs/sm_damagereport.cfg` and reload the plugin. Each case puts the file back when it ends.
 
+## Changes in 2.2.1
+
+Changes since 2.2.0:
+
+- The settings file is written only when a `drs` command changes a setting, at most once every 5 seconds, and at map end and plugin unload. Before, each `drs` command wrote the file, so a player could flood the disk.
+- The report timer keeps the victim by userid. A report is no longer shown to a different player who takes the same slot.
+- Stored player names lose control bytes, so a name cannot change the chat colors of a report or an award.
+- A long name is cut on a whole UTF-8 character. Before, the cut could leave a broken byte before the "...".
+- `dr` and `drs` do nothing for a client that is still loading. Before, they logged errors during a map change.
+- The death report is about 10 times faster, and the round-start clear skips rows with no damage. Measured on a full 64-slot server: death report 982 to 91 microseconds, round start 965 to 578 microseconds.
+
+Tested: regression suite with the real CS:S client (`test.ps1 -WithClient`), 18 passed, 0 failed, 0 skipped.
+
 ## Changes in 2.2.0
 
 Changes since 2.1.0:
