@@ -38,6 +38,16 @@
 #define KILL_DAMAGE 500.0
 // The plugin shows its panel 1 s after death and retries each second while another menu is open.
 #define REPORT_WAIT 3.0
+// The plugin writes changed settings at most once per 5 s; wait a little longer.
+#define SAVE_WAIT 6.5
+#define SETTINGS_SENTINEL "// dr_test sentinel"
+#define COMMAND_SPAM 5
+#define LOADING_POLLS 600 // 0.1 s apart: 60 s for the client to reconnect after the map change
+// A control byte would recolor the award line; a name over 21 bytes is cut at byte 18.
+#define FAKE_CONTROL_NAME "DRFake\x03Ctl"
+#define FAKE_CONTROL_SHOWN "DRFakeCtl"
+#define FAKE_UTF8_NAME "DRFakeaÄÄÄÄÄÄÄÄÄÄÄ"
+#define FAKE_UTF8_SHOWN "DRFakeaÄÄÄÄÄ..."
 
 enum
 {
@@ -55,6 +65,10 @@ enum
 	C_ROUND_END_ALIVE,
 	C_ADMIN_ONLY,
 	C_AWARDS_AUDIENCE,
+	C_SETTINGS_WRITES,
+	C_SETTINGS_RELOAD,
+	C_NAME_SAFE,
+	C_NOT_IN_GAME, // changes the map, so it runs last
 	NUM_CASES
 }
 
@@ -119,6 +133,10 @@ public void OnPluginStart()
 	SetCase(C_ROUND_END_ALIVE, "real client: alive player gets the report panel, both award lines and no report text in chat at round end", true);
 	SetCase(C_ADMIN_ONLY, "real client: admin-only mode hides reports from non-admins, admin flag gives access", true);
 	SetCase(C_AWARDS_AUDIENCE, "real client: awards reach all players or only admins, apart from report access", true);
+	SetCase(C_SETTINGS_WRITES, "real client: drs commands that change nothing do not write the settings file; a burst of changes is written once, later", true);
+	SetCase(C_SETTINGS_RELOAD, "real client: a setting changed just before a plugin reload is kept", true);
+	SetCase(C_NAME_SAFE, "real client: award names lose control bytes and are cut on a whole UTF-8 character", true);
+	SetCase(C_NOT_IN_GAME, "real client: dr and drs from a client that is still loading raise no error", true);
 
 	RegServerCmd("dr_test", Cmd_RunTests, "Run the damage report regression tests");
 	g_cvAutorun = CreateConVar("dr_test_autorun", "0", "Run the suite on map start and quit when done <1|0>.", FCVAR_NONE, true, 0.0, true, 1.0);
@@ -453,6 +471,10 @@ void RunStep(int c, int step)
 		case C_ROUND_END_ALIVE: Case_RoundEndAlive(step);
 		case C_ADMIN_ONLY: Case_AdminOnly(step);
 		case C_AWARDS_AUDIENCE: Case_AwardsAudience(step);
+		case C_SETTINGS_WRITES: Case_SettingsWrites(step);
+		case C_SETTINGS_RELOAD: Case_SettingsReload(step);
+		case C_NAME_SAFE: Case_NameSafe(step);
+		case C_NOT_IN_GAME: Case_NotInGame(step);
 	}
 }
 
@@ -956,6 +978,274 @@ void Case_AwardsAudience(int step)
 				EndCase(true, "non-admin: awards only when for all players; admin: awards and panel");
 		}
 	}
+}
+
+void Case_SettingsWrites(int step)
+{
+	int h = FindHuman();
+	if (h == 0)
+	{
+		EndCase(false, "the real client left during the case");
+		return;
+	}
+	switch (step)
+	{
+		// Let a save that an earlier case started finish first.
+		case 0: Schedule(SAVE_WAIT, C_SETTINGS_WRITES, 1);
+		case 1:
+		{
+			AppendSettingsSentinel();
+			// Each reply is chat; the client drops a connection that gets too many in one frame.
+			FakeClientCommand(h, "drs status");
+			FakeClientCommand(h, "drs help");
+			FakeClientCommand(h, "drs bogus");
+			FakeClientCommand(h, "drs on");
+			Schedule(0.5, C_SETTINGS_WRITES, 2);
+		}
+		case 2:
+		{
+			if (!SettingsHasSentinel())
+			{
+				EndCase(false, "drs commands that changed nothing rewrote the settings file");
+				return;
+			}
+			for (int i = 0; i < COMMAND_SPAM; i++)
+			{
+				FakeClientCommand(h, "drs popup");
+				FakeClientCommand(h, "drs chat");
+			}
+			Schedule(0.5, C_SETTINGS_WRITES, 3);
+		}
+		case 3:
+		{
+			if (!SettingsHasSentinel())
+			{
+				RestoreHumanSettings();
+				EndCase(false, "a burst of drs changes rewrote the settings file at once");
+				return;
+			}
+			Schedule(SAVE_WAIT, C_SETTINGS_WRITES, 4);
+		}
+		case 4:
+		{
+			int popChat;
+			bool stored = ReadClientSetting(h, "PopChat", popChat);
+			bool rewritten = !SettingsHasSentinel();
+			RestoreHumanSettings();
+			if (!rewritten)
+				EndCase(false, "the changed setting was never written");
+			else if (!stored || popChat != 0)
+				EndCase(false, "the settings file has no PopChat 0 entry for the client");
+			else
+				Schedule(SAVE_WAIT, C_SETTINGS_WRITES, 5);
+		}
+		case 5:
+		{
+			int popChat;
+			if (ReadClientSetting(h, "PopChat", popChat))
+				EndCase(false, "the entry stayed in the file after the client went back to the defaults");
+			else
+				EndCase(true, "no write for unchanged settings; one later write for a burst; defaults remove the entry");
+		}
+	}
+}
+
+void Case_SettingsReload(int step)
+{
+	int h = FindHuman();
+	if (h == 0)
+	{
+		EndCase(false, "the real client left during the case");
+		return;
+	}
+	switch (step)
+	{
+		case 0:
+		{
+			FakeClientCommand(h, "drs chat");
+			ServerCommand("sm plugins reload sm_damagereport");
+			Schedule(RELOAD_WAIT, C_SETTINGS_RELOAD, 1);
+		}
+		case 1:
+		{
+			ResetCapture();
+			FakeClientCommand(h, "drs status");
+			Schedule(1.0, C_SETTINGS_RELOAD, 2);
+		}
+		case 2:
+		{
+			bool kept = ChatHas("is printed in chat");
+			RestoreHumanSettings();
+			if (kept)
+				EndCase(true, "drs chat kept after the reload");
+			else
+				EndCase(false, "drs chat was lost by the reload");
+		}
+	}
+}
+
+void Case_NameSafe(int step)
+{
+	switch (step)
+	{
+		case 0:
+		{
+			int attacker = SpawnFake(FAKE_CONTROL_NAME, CS_TEAM_T);
+			int victim = SpawnFake(FAKE_VICTIM, CS_TEAM_CT);
+			if (attacker == 0 || victim == 0)
+			{
+				EndCase(false, "could not create fake clients");
+				return;
+			}
+			g_uidAttacker = GetClientUserId(attacker);
+			g_uidVictim = GetClientUserId(victim);
+			Schedule(1.0, C_NAME_SAFE, 1);
+		}
+		case 1, 3:
+		{
+			int attacker = GetClientOfUserId(g_uidAttacker);
+			int victim = GetClientOfUserId(g_uidVictim);
+			if (attacker == 0 || victim == 0)
+			{
+				EndCase(false, "fake client is gone");
+				return;
+			}
+			SDKHooks_TakeDamage(victim, attacker, attacker, HIT_DAMAGE, DMG_BULLET);
+			FireRoundEnd();
+			Schedule(1.0, C_NAME_SAFE, step + 1);
+		}
+		case 2:
+		{
+			if (!ChatHas(AWARD_DAMAGE ... FAKE_CONTROL_SHOWN ... AWARD_STAT))
+			{
+				EndCase(false, "the award line does not show " ... FAKE_CONTROL_SHOWN ... " without its control byte");
+				return;
+			}
+			KickClient(GetClientOfUserId(g_uidAttacker), "damage report test cleanup");
+			int attacker = SpawnFake(FAKE_UTF8_NAME, CS_TEAM_T);
+			if (attacker == 0)
+			{
+				EndCase(false, "could not create the UTF-8 fake");
+				return;
+			}
+			g_uidAttacker = GetClientUserId(attacker);
+			FireNamedEvent("round_start");
+			ResetCapture();
+			Schedule(1.0, C_NAME_SAFE, 3);
+		}
+		case 4:
+		{
+			if (ChatHas(AWARD_DAMAGE ... FAKE_UTF8_SHOWN ... AWARD_STAT))
+				EndCase(true, "control byte removed; long UTF-8 name cut before a whole character");
+			else
+				EndCase(false, "the award line does not show " ... FAKE_UTF8_SHOWN);
+		}
+	}
+}
+
+bool g_mapChangePending;
+
+void Case_NotInGame(int step)
+{
+	switch (step)
+	{
+		case 0:
+		{
+			// During a map change every client is connected but not in game until it has loaded the map.
+			CleanupFakes();
+			g_mapChangePending = true;
+			char map[PLATFORM_MAX_PATH];
+			GetCurrentMap(map, sizeof(map));
+			ServerCommand("changelevel %s", map);
+		}
+		case 1:
+		{
+			// The client reconnects some time after the new map starts.
+			static int polls;
+			int loading = FindLoadingHuman();
+			if (loading == 0)
+			{
+				if (FindHuman() == 0 && ++polls < LOADING_POLLS)
+				{
+					Schedule(0.1, C_NOT_IN_GAME, 1);
+					return;
+				}
+				polls = 0;
+				EndCase(false, "no client was seen while it was still loading the map");
+				return;
+			}
+			polls = 0;
+			FakeClientCommand(loading, "dr");
+			FakeClientCommand(loading, "dr help");
+			FakeClientCommand(loading, "drs status");
+			Schedule(1.0, C_NOT_IN_GAME, 2);
+		}
+		case 2: EndCase(true, "dr, dr help and drs status from a loading client raised no error");
+	}
+}
+
+public void OnConfigsExecuted()
+{
+	if (!g_mapChangePending)
+		return;
+	g_mapChangePending = false;
+	g_interfered = false; // the map change fires its own round_start
+	RunStep(C_NOT_IN_GAME, 1);
+}
+
+int FindLoadingHuman()
+{
+	for (int i = 1; i <= MaxClients; i++)
+		if (IsClientConnected(i) && !IsClientInGame(i) && !IsFakeClient(i))
+			return i;
+	return 0;
+}
+
+void SettingsPath(char[] path, int maxlen)
+{
+	BuildPath(Path_SM, path, maxlen, SETTINGS_FILE);
+}
+
+// A comment line the plugin drops whenever it rewrites the file.
+void AppendSettingsSentinel()
+{
+	char path[PLATFORM_MAX_PATH];
+	SettingsPath(path, sizeof(path));
+	File f = OpenFile(path, "ab");
+	if (f == null)
+	{
+		LogToFileEx(g_logPath, "[INFO]   cannot append to %s", path);
+		return;
+	}
+	f.WriteString("\n" ... SETTINGS_SENTINEL ... "\n", false);
+	delete f;
+}
+
+bool SettingsHasSentinel()
+{
+	char path[PLATFORM_MAX_PATH], line[512];
+	SettingsPath(path, sizeof(path));
+	File f = OpenFile(path, "rb");
+	if (f == null)
+		return false;
+	bool found = false;
+	while (!found && f.ReadLine(line, sizeof(line)))
+		found = StrContains(line, SETTINGS_SENTINEL) != -1;
+	delete f;
+	return found;
+}
+
+bool ReadClientSetting(int client, const char[] key, int &value)
+{
+	char path[PLATFORM_MAX_PATH], steamId[32];
+	SettingsPath(path, sizeof(path));
+	GetClientAuthId(client, AuthId_Steam2, steamId, sizeof(steamId), true);
+	KeyValues kv = new KeyValues("DamageReportSetting");
+	bool found = kv.ImportFromFile(path) && kv.JumpToKey(steamId);
+	if (found)
+		value = kv.GetNum(key, -1);
+	delete kv;
+	return found;
 }
 
 //===== Case helpers =====
